@@ -1,0 +1,488 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found]){display:none!important}</style></head><body>
+<title>PerceptionLM for Aerial Tracking</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --paper: #F5F7F6;
+    --ink: #1B2733;
+    --muted: #5B6B77;
+    --accent: #0F7A63;
+    --accent-soft: #E3EFEA;
+    --signal: #C77B21;
+    --signal-soft: #F6EDDE;
+    --line: #D8DEDC;
+    --card: #FFFFFF;
+    --code-bg: #10181E;
+    --code-ink: #D9E2DE;
+    --code-accent: #6FD3B4;
+    --code-comment: #7C8F98;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #10181E;
+      --ink: #E3EAE7;
+      --muted: #8FA0A8;
+      --accent: #3BB894;
+      --accent-soft: #16302A;
+      --signal: #E0A04A;
+      --signal-soft: #2E2416;
+      --line: #263239;
+      --card: #162028;
+      --code-bg: #0B1116;
+      --code-ink: #D9E2DE;
+      --code-accent: #6FD3B4;
+      --code-comment: #6E828C;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #10181E;
+    --ink: #E3EAE7;
+    --muted: #8FA0A8;
+    --accent: #3BB894;
+    --accent-soft: #16302A;
+    --signal: #E0A04A;
+    --signal-soft: #2E2416;
+    --line: #263239;
+    --card: #162028;
+    --code-bg: #0B1116;
+    --code-ink: #D9E2DE;
+    --code-accent: #6FD3B4;
+    --code-comment: #6E828C;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Source Serif 4", Georgia, serif;
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 20px 96px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  .prose { max-width: 68ch; }
+
+  h1, h2, h3, .eyebrow, .opt-title, th, .kicker, .tile b, .step-n {
+    font-family: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    margin: 0.4em 0 0.25em;
+    text-wrap: balance;
+  }
+  h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    margin: 0 0 0.6em;
+    text-wrap: balance;
+  }
+  h3 {
+    font-size: 1.08rem;
+    font-weight: 700;
+    margin: 2em 0 0.5em;
+  }
+  p { margin: 0 0 1em; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  code, pre, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  code { font-size: 0.86em; background: var(--accent-soft); padding: 0.1em 0.35em; border-radius: 3px; }
+  strong { font-weight: 600; }
+
+  header.masthead { padding-top: 56px; border-bottom: 3px solid var(--ink); padding-bottom: 28px; }
+  .eyebrow {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em 1.4em;
+  }
+  .eyebrow span.dim { color: var(--muted); }
+  .subtitle { color: var(--muted); font-size: 1.1rem; max-width: 60ch; margin-top: 0.4em; }
+
+  section { margin-top: 56px; }
+  .part-label {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    border-top: 3px solid var(--ink);
+    padding-top: 14px;
+    margin: 72px 0 28px;
+  }
+  .part-label .kicker {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .part-label h2 { margin: 0; font-size: 1.7rem; }
+
+  /* Executive summary */
+  .exec {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    padding: 26px 30px;
+    margin-top: 40px;
+  }
+  .exec .kicker {
+    font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.14em; color: var(--accent); margin-bottom: 10px;
+  }
+  .exec p:last-child { margin-bottom: 0; }
+
+  /* Fact tiles */
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin: 28px 0;
+  }
+  .tile {
+    background: var(--card);
+    border: 1px solid var(--line);
+    padding: 14px 16px;
+  }
+  .tile b { display: block; font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+  .tile span { font-size: 0.8rem; color: var(--muted); line-height: 1.4; display: block; margin-top: 2px; }
+
+  /* Tables */
+  .table-scroll { overflow-x: auto; margin: 20px 0 28px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.92rem; font-family: "Archivo", sans-serif; }
+  th {
+    text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--muted); font-weight: 600; padding: 8px 14px 8px 0;
+    border-bottom: 2px solid var(--ink); white-space: nowrap;
+  }
+  td { padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.mono { font-size: 0.82rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  tr.rec td { background: var(--accent-soft); }
+  td:first-child, th:first-child { padding-left: 10px; }
+
+  .pill {
+    display: inline-block; font-family: "Archivo", sans-serif; font-size: 0.68rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .pill.warn { background: var(--signal-soft); color: var(--signal); }
+
+  /* Options */
+  .options { display: grid; gap: 14px; margin: 24px 0; }
+  .opt {
+    background: var(--card); border: 1px solid var(--line); padding: 20px 24px;
+    display: grid; grid-template-columns: 44px 1fr; gap: 18px;
+  }
+  .opt.rec { border-color: var(--accent); border-width: 2px; }
+  .opt-rank {
+    font-family: "Archivo", sans-serif; font-weight: 800; font-size: 1.5rem;
+    color: var(--accent); line-height: 1.2;
+  }
+  .opt-title { font-weight: 700; font-size: 1.02rem; margin: 0 0 4px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .opt p { font-size: 0.95rem; margin: 0.4em 0 0; }
+  .opt .meta { font-family: "Archivo", sans-serif; font-size: 0.78rem; color: var(--muted); margin-top: 10px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+  .opt .meta b { color: var(--ink); font-weight: 600; }
+
+  /* Code */
+  pre {
+    background: var(--code-bg); color: var(--code-ink);
+    padding: 20px 22px; overflow-x: auto; font-size: 0.8rem; line-height: 1.6;
+    margin: 18px 0 28px; border-radius: 4px;
+  }
+  pre .c { color: var(--code-comment); }
+  pre .k { color: var(--code-accent); }
+  .code-caption {
+    font-family: "Archivo", sans-serif; font-size: 0.75rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 24px 0 -8px;
+  }
+
+  /* Callouts */
+  .callout {
+    border: 1px solid var(--line); border-left: 4px solid var(--signal);
+    background: var(--signal-soft); padding: 16px 22px; margin: 24px 0; font-size: 0.95rem;
+  }
+  .callout.key { border-left-color: var(--accent); background: var(--accent-soft); }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .kicker {
+    font-family: "Archivo", sans-serif; font-size: 0.7rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 6px; color: var(--signal);
+  }
+  .callout.key .kicker { color: var(--accent); }
+
+  /* Steps / future work */
+  ol.steps { list-style: none; padding: 0; margin: 20px 0; display: grid; gap: 10px; }
+  ol.steps li {
+    display: grid; grid-template-columns: 34px 1fr; gap: 14px;
+    background: var(--card); border: 1px solid var(--line); padding: 14px 18px; font-size: 0.96rem;
+  }
+  .step-n { font-weight: 800; color: var(--accent); font-size: 1.05rem; }
+  ol.steps b { font-weight: 600; font-family: "Archivo", sans-serif; font-size: 0.92rem; }
+  ol.steps p { margin: 2px 0 0; }
+
+  ul.refs { padding-left: 1.1em; font-size: 0.92rem; }
+  ul.refs li { margin-bottom: 6px; }
+
+  footer { margin-top: 80px; border-top: 1px solid var(--line); padding-top: 16px; font-size: 0.82rem; color: var(--muted); font-family: "Archivo", sans-serif; }
+
+  @media (max-width: 560px) {
+    .opt { grid-template-columns: 1fr; gap: 6px; }
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <div class="eyebrow">
+    <span>Paper review &amp; application guide</span>
+    <span class="dim">arXiv 2504.13180 · Meta FAIR · April 2025</span>
+    <span class="dim">Prepared September 2026</span>
+  </div>
+  <h1>PerceptionLM for Aerial Tracking</h1>
+  <p class="subtitle">A review of Meta's PerceptionLM (PLM) and Perception Encoder (PE), and the practical options for using them to track objects in aerial images and video — offline analysis context.</p>
+</header>
+
+<div class="exec">
+  <div class="kicker">Executive summary — the one-paragraph decision</div>
+  <p><strong>PerceptionLM is not a tracker; it is an open vision-language model that understands images and video in detail.</strong> In the paper, tracks are an <em>input</em> it describes, produced upstream by SAM&nbsp;2. For our aerial use case the best value-for-effort path is therefore a two-model pipeline: <strong>PLM finds the target from a natural-language description (a bounding box on one frame), SAM&nbsp;2 propagates that box as a tracked mask through the video.</strong> Zero training, off-the-shelf checkpoints, runs offline on a single 24–80&nbsp;GB GPU. PLM then adds what no plain tracker gives us: per-track natural-language analysis ("when does this vehicle stop?"). The known risk is domain gap — the models were trained on web/egocentric video, not overhead imagery — so step one of future work is a small aerial evaluation set; the upgrade path if zero-shot quality falls short is fine-tuning a detector on VisDrone with the released PE&nbsp;Spatial backbone.</p>
+</div>
+
+<!-- ============================ PART I ============================ -->
+<div class="part-label">
+  <span class="kicker">Part I</span>
+  <h2>Paper review</h2>
+</div>
+
+<section class="prose">
+  <h3>What the paper contributes</h3>
+  <p><em>PerceptionLM: Open-Access Data and Models for Detailed Visual Understanding</em> (Cho et&nbsp;al., Meta FAIR) is primarily a statement about openness. Most strong vision-language models are either closed, or open-weight but trained by distilling from closed models, which makes the results scientifically unreproducible. PLM is trained end-to-end <strong>without any distillation from proprietary models</strong>, and everything is released: weights, training data recipe, and evaluation suite.</p>
+  <p>The concrete releases matter more to us than the ideology:</p>
+  <ul>
+    <li><strong>PLM models</strong> at 1B, 3B and 8B parameters (research license).</li>
+    <li><strong>Perception Encoder (PE)</strong>, the vision backbone family, released separately under Apache&nbsp;2.0 (companion paper, arXiv&nbsp;2504.13181).</li>
+    <li><strong>2.8M human-labeled video instances</strong>: fine-grained video QA (PLM-FGQA) and spatio-temporally grounded captions (PLM-STC) — the largest such release to date.</li>
+    <li><strong>PLM-VideoBench</strong>, a benchmark for fine-grained and temporally grounded video understanding.</li>
+  </ul>
+</section>
+
+<section>
+  <h3>Architecture in numbers</h3>
+  <div class="tiles">
+    <div class="tile"><b>1B / 3B / 8B</b><span>Model sizes; PE vision encoder → 2-layer MLP → Llama&nbsp;3 decoder</span></div>
+    <div class="tile"><b>448 × 448 px</b><span>Resolution per image tile and per video frame</span></div>
+    <div class="tile"><b>36 tiles</b><span>Dynamic tiling for high-res <em>images</em> (up to 9,472 vision tokens)</span></div>
+    <div class="tile"><b>32 frames</b><span>Uniformly sampled per <em>video</em>, no tiling (8,192 vision tokens)</span></div>
+  </div>
+  <div class="prose">
+    <p>Each 448² tile or frame produces 1,024 vision tokens, reduced to 256 by 2×2 average pooling. The asymmetry in the last two tiles above is the single most important fact for aerial work: <strong>images get high-resolution tiling; video does not.</strong> A small vehicle that survives 36-tile image processing disappears when the whole frame is resized to 448² on the video path.</p>
+  </div>
+</section>
+
+<section class="prose">
+  <h3>The three region tasks — and where the tracks come from</h3>
+  <p>The paper's "spatio-temporal grounding" is what makes it sound like a tracking paper. Precisely, PLM learns three region-conditioned tasks:</p>
+  <ul>
+    <li><strong>RCap</strong> — given a box/mask region on a frame, caption that region.</li>
+    <li><strong>RTLoc</strong> — given a region and an event description, output the start/end frames.</li>
+    <li><strong>RDCap</strong> — dense captioning of everything a region does across the clip.</li>
+  </ul>
+  <div class="callout key">
+    <div class="kicker">The key clarification</div>
+    <p>In all three tasks the region is an <strong>input</strong>. To build the PLM-STC training data, Meta ran <strong>SAM&nbsp;2</strong> to generate masklets (tracked segmentation masks) and had humans caption them. PLM never learns to output a track — it learns to <em>reason about</em> one. Any tracking system built on this paper is therefore a pipeline: something produces the track, PLM interprets it (or seeds it, via image grounding).</p>
+  </div>
+  <p>On the image side PLM additionally does <strong>grounding</strong> — it outputs a bounding box for a text query (the repo ships an <code>image_grounding.ipynb</code> demo). That single capability is the hook that lets PLM act as an open-vocabulary detector.</p>
+</section>
+
+<section>
+  <h3>Perception Encoder: the reusable half</h3>
+  <div class="prose">
+    <p>PE is a family of ViT encoders with one training recipe and three "views", exposed by taking features from different depths. For us, <strong>PE&nbsp;Spatial</strong> is the interesting one — it is explicitly refined with a SAM&nbsp;2.1 mask-based objective for dense prediction, and it is the released component you would build a real aerial detector on.</p>
+  </div>
+  <div class="table-scroll">
+    <table>
+      <tr><th>Variant</th><th>Purpose</th><th>Headline result</th></tr>
+      <tr><td><span class="mono">PE Core</span> (T/16 → G/14)</td><td>CLIP-style zero-shot classification &amp; retrieval</td><td class="mono">85.4% ImageNet-1k · 76.9% Kinetics-400</td></tr>
+      <tr><td><span class="mono">PE Lang</span> (L/14, G/14)</td><td>LLM-aligned features; the encoder inside PLM</td><td class="mono">84.4% DocVQA (frozen)</td></tr>
+      <tr class="rec"><td><span class="mono">PE Spatial</span> (G/14 + distilled)</td><td>Dense prediction: detection, segmentation, tracking</td><td class="mono">66.0 box mAP COCO · 61.5 J&amp;F DAVIS zero-shot</td></tr>
+    </table>
+  </div>
+  <div class="prose">
+    <p>The 61.5&nbsp;J&amp;F on DAVIS is <em>zero-shot</em> video object tracking by non-parametric feature propagation — no tracking head was trained. It signals that PE&nbsp;Spatial features carry the temporal correspondence structure a tracker needs.</p>
+  </div>
+</section>
+
+<section class="prose">
+  <h3>Benchmarks and honest limits</h3>
+  <p>PLM-8B is competitive with or ahead of open-data peers on video QA and sets the pace on the paper's own fine-grained benchmarks (which it also introduces — grain of salt). Against closed frontier models it trades blows on standard suites and wins mainly on detailed, temporally grounded video understanding, which is exactly the axis Meta curated data for. Nothing in the paper is evaluated on overhead or aerial imagery; every training source is web, instructional, or egocentric video. That is the gap we must measure ourselves.</p>
+</section>
+
+<!-- ============================ PART II ============================ -->
+<div class="part-label">
+  <span class="kicker">Part II</span>
+  <h2>Running it on aerial imagery</h2>
+</div>
+
+<section>
+  <div class="prose">
+    <p>Four viable pipelines, ranked by value for effort in an <strong>offline analysis</strong> setting (recorded footage, workstation GPU, accuracy over latency). Rank order is the recommendation.</p>
+  </div>
+
+  <div class="options">
+    <div class="opt rec">
+      <div class="opt-rank">1</div>
+      <div>
+        <div class="opt-title">PLM grounding + SAM&nbsp;2 propagation <span class="pill">Recommended · zero training</span></div>
+        <p>PLM localizes the target from a text description on one (tiled, full-resolution) frame; the box prompts SAM&nbsp;2, which propagates a tracked mask through the clip. This is the paper's own data-engine pipeline, inverted for inference. Re-query PLM every N seconds to acquire objects that enter the scene.</p>
+        <div class="meta"><span>Effort <b>Days</b></span><span>Training <b>None</b></span><span>Strength <b>Open-vocabulary, promptable, pixel-accurate masks</b></span><span>Risk <b>Domain gap on grounding</b></span></div>
+      </div>
+    </div>
+    <div class="opt">
+      <div class="opt-rank">2</div>
+      <div>
+        <div class="opt-title">PLM as the analysis layer on existing tracks</div>
+        <p>Keep whatever tracker you have; feed clips plus a tracked region into PLM's RCap/RTLoc/RDCap-style prompts to classify behavior and answer questions per track ("when does this vehicle stop?"). This is the capability no other open model offers and it composes with Option&nbsp;1.</p>
+        <div class="meta"><span>Effort <b>Days</b></span><span>Training <b>None</b></span><span>Strength <b>Semantic per-track analysis</b></span><span>Risk <b>Low</b></span></div>
+      </div>
+    </div>
+    <div class="opt">
+      <div class="opt-rank">3</div>
+      <div>
+        <div class="opt-title">PE&nbsp;Spatial + detector head + ByteTrack <span class="pill warn">Upgrade path</span></div>
+        <p>Fine-tune a detection head (Mask&nbsp;R-CNN / DETA) on VisDrone or UAVDT with PE&nbsp;Spatial as backbone, then run tracking-by-detection. Best small-object accuracy and throughput; the right move once Option&nbsp;1's zero-shot quality is measured and found wanting.</p>
+        <div class="meta"><span>Effort <b>Weeks (training + data)</b></span><span>Training <b>Detector fine-tune</b></span><span>Strength <b>Production-grade aerial MOT</b></span><span>Risk <b>Highest up-front cost</b></span></div>
+      </div>
+    </div>
+    <div class="opt">
+      <div class="opt-rank">4</div>
+      <div>
+        <div class="opt-title">PLM per-frame detection + IoU/Kalman association</div>
+        <p>Run PLM grounding on every frame and link boxes yourself. Works, but a full VLM forward per frame is slow even offline, and VLM boxes are not detector-grade on tiny targets. Only worth it for very low frame-rate imagery (e.g. satellite passes).</p>
+        <div class="meta"><span>Effort <b>Days</b></span><span>Training <b>None</b></span><span>Strength <b>Simple mental model</b></span><span>Risk <b>Slow, jittery boxes</b></span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h3>Worked example — Option 1, end to end</h3>
+  <div class="prose">
+    <p>Everything below runs offline on one GPU (PLM-3B fits in 24&nbsp;GB; PLM-8B and SAM&nbsp;2.1-Large are comfortable on an A100/H100). Snippets are illustrative — check the repos for exact current APIs.</p>
+  </div>
+
+  <div class="code-caption">Setup — one environment, three checkpoints</div>
+  <pre><span class="c"># PerceptionLM + Perception Encoder</span>
+git clone https://github.com/facebookresearch/perception_models.git
+cd perception_models &amp;&amp; pip install -e .
+
+<span class="c"># SAM 2 (separate repo, separate checkpoint)</span>
+git clone https://github.com/facebookresearch/sam2.git
+cd sam2 &amp;&amp; pip install -e .
+
+<span class="c"># Checkpoints: facebook/Perception-LM-{1B,3B,8B} on HuggingFace;</span>
+<span class="c"># sam2.1_hiera_large.pt from the sam2 repo's download script.</span></pre>
+
+  <div class="code-caption">Step 1 — PLM grounds the target on a full-resolution frame</div>
+  <pre><span class="k">from</span> transformers <span class="k">import</span> AutoProcessor, AutoModelForImageTextToText
+<span class="k">import</span> cv2
+
+MODEL = <span class="k">"facebook/Perception-LM-8B"</span>
+processor = AutoProcessor.from_pretrained(MODEL)
+model = AutoModelForImageTextToText.from_pretrained(MODEL, device_map=<span class="k">"cuda"</span>)
+
+<span class="c"># Grab frame 0 of the aerial clip. The IMAGE path tiles up to 36×448²,</span>
+<span class="c"># so small targets survive — never send full frames down the video path.</span>
+frame = cv2.cvtColor(cv2.VideoCapture(<span class="k">"flight_042.mp4"</span>).read()[1],
+                     cv2.COLOR_BGR2RGB)
+
+conversation = [{<span class="k">"role"</span>: <span class="k">"user"</span>, <span class="k">"content"</span>: [
+    {<span class="k">"type"</span>: <span class="k">"image"</span>, <span class="k">"image"</span>: frame},
+    {<span class="k">"type"</span>: <span class="k">"text"</span>,
+     <span class="k">"text"</span>: <span class="k">"Provide the bounding box of the white pickup truck "
+             "driving on the dirt road."</span>},
+]}]
+inputs = processor.apply_chat_template(conversation, return_tensors=<span class="k">"pt"</span>,
+                                       add_generation_prompt=True).to(<span class="k">"cuda"</span>)
+out = model.generate(**inputs, max_new_tokens=64)
+box = parse_box(processor.decode(out[0]))   <span class="c"># → [x1, y1, x2, y2] in pixels</span></pre>
+
+  <div class="code-caption">Step 2 — SAM 2 turns the box into a track</div>
+  <pre><span class="k">from</span> sam2.build_sam <span class="k">import</span> build_sam2_video_predictor
+
+predictor = build_sam2_video_predictor(<span class="k">"sam2.1_hiera_l.yaml"</span>,
+                                       <span class="k">"sam2.1_hiera_large.pt"</span>)
+state = predictor.init_state(video_path=<span class="k">"flight_042_frames/"</span>)
+
+<span class="c"># Seed with PLM's box on frame 0 → object id 1</span>
+predictor.add_new_points_or_box(state, frame_idx=0, obj_id=1, box=box)
+
+<span class="c"># Propagate: a mask per object per frame — the actual track</span>
+tracks = {}
+<span class="k">for</span> f_idx, obj_ids, masks <span class="k">in</span> predictor.propagate_in_video(state):
+    tracks[f_idx] = {oid: (m &gt; 0).cpu().numpy()
+                     <span class="k">for</span> oid, m <span class="k">in</span> zip(obj_ids, masks)}
+
+<span class="c"># Offline loop: every ~5 s, re-run Step 1 on a fresh frame, add any box</span>
+<span class="c"># that doesn't overlap an existing masklet (IoU &lt; 0.3) as a new obj_id.</span></pre>
+
+  <div class="code-caption">Step 3 (Option 2) — PLM analyzes the finished track</div>
+  <pre><span class="c"># Crop a 32-frame clip around track #1 (crop ≈ 2× the masklet's extent,</span>
+<span class="c"># so the 448² video path keeps the target large) and ask RDCap-style:</span>
+question = (<span class="k">"This clip follows a single vehicle. Describe its movements "
+            "step by step, and state the frame ranges where it is stopped."</span>)
+<span class="c"># → "The truck travels north along the road (frames 0–210), slows and</span>
+<span class="c">#    stops beside a structure (frames 210–380), then continues north."</span></pre>
+</section>
+
+<section>
+  <h3>Aerial-specific constraints</h3>
+  <div class="table-scroll">
+    <table>
+      <tr><th>Constraint</th><th>Consequence</th><th>Mitigation</th></tr>
+      <tr><td>Video path is 32 frames at 448², no tiling</td><td>Small aerial targets vanish on native video input</td><td>Ground on <em>frames as images</em> (36-tile path); crop clips around tracks before video-path analysis</td></tr>
+      <tr><td>Uniform 32-frame sampling</td><td>Long videos lose temporal density</td><td>Chunk footage into 5–15&nbsp;s clips; offline, cost is just compute time</td></tr>
+      <tr><td>Web/egocentric training data</td><td>Unmeasured accuracy on nadir/oblique views</td><td>Build a small labeled aerial eval set <em>first</em>; fine-tune (repo supports it) if grounding recall is poor</td></tr>
+      <tr><td>VLM inference cost</td><td>PLM per-frame is slow</td><td>PLM only for acquisition + analysis; SAM&nbsp;2 (~real-time) carries frame-to-frame tracking</td></tr>
+      <tr><td>Licensing</td><td>PLM is research-licensed</td><td>PE is Apache&nbsp;2.0; check the PLM license against intended use before productizing</td></tr>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h3>Future work</h3>
+  <ol class="steps">
+    <li><span class="step-n">1</span><div><b>Aerial evaluation set before anything else.</b><p>Label 20–50 short clips from our own footage (boxes + identities). Measure PLM grounding recall on frame crops and Option-1 end-to-end HOTA/MOTA. Every later decision hangs on these numbers.</p></div></li>
+    <li><span class="step-n">2</span><div><b>Tiled-grounding utility.</b><p>A small wrapper that splits a 4K aerial frame into overlapping crops, runs PLM grounding per crop, and merges boxes (NMS). Directly attacks the small-object weakness with no training.</p></div></li>
+    <li><span class="step-n">3</span><div><b>Re-acquisition &amp; ID management.</b><p>Periodic PLM re-grounding to catch entrances; IoU-gated matching against live SAM&nbsp;2 masklets; track termination on mask collapse. This turns the demo into a multi-object system.</p></div></li>
+    <li><span class="step-n">4</span><div><b>Fine-tune if (and only if) step 1 says so.</b><p>Two escalation levels: PLM grounding fine-tune on VisDrone-format data; or the full Option-3 build — PE&nbsp;Spatial + detector head + ByteTrack — for production-grade small-object MOT.</p></div></li>
+    <li><span class="step-n">5</span><div><b>Per-track analytics on top.</b><p>Batch RDCap/RTLoc-style queries over finished tracks: stop detection, interaction events, route summaries — the layer that feeds trajectory planning downstream.</p></div></li>
+    <li><span class="step-n">6</span><div><b>Track the model line.</b><p>SAM&nbsp;2.1 already supersedes the SAM&nbsp;2 used in the paper's data engine; watch the perception_models repo for PLM/PE successors and for community aerial fine-tunes.</p></div></li>
+  </ol>
+</section>
+
+<section class="prose">
+  <h3>Sources</h3>
+  <ul class="refs">
+    <li><a href="https://arxiv.org/abs/2504.13180">PerceptionLM: Open-Access Data and Models for Detailed Visual Understanding</a> — the reviewed paper (arXiv 2504.13180)</li>
+    <li><a href="https://arxiv.org/abs/2504.13181">Perception Encoder: The best visual embeddings are not at the output of the network</a> — companion paper (arXiv 2504.13181)</li>
+    <li><a href="https://github.com/facebookresearch/perception_models">facebookresearch/perception_models</a> — code, checkpoints, fine-tuning, <code>image_grounding.ipynb</code></li>
+    <li><a href="https://github.com/facebookresearch/sam2">facebookresearch/sam2</a> — SAM&nbsp;2 / 2.1 video predictor</li>
+    <li><a href="https://huggingface.co/docs/transformers/main/model_doc/perception_lm">PerceptionLM in HuggingFace Transformers</a> — native inference API</li>
+  </ul>
+</section>
+
+<footer>
+  Review prepared from the paper, the perception_models repository, and public documentation · September 2026. Code snippets are illustrative; verify against current repo APIs.
+</footer>
+
+</div>
+
+</body></html>

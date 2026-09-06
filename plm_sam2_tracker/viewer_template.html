@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aerial Track Viewer</title>
+<style>
+  :root {
+    --bg: #10181E; --panel: #162028; --ink: #E3EAE7; --muted: #8FA0A8;
+    --line: #263239; --accent: #3BB894;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 18px;
+  }
+  h1 { font-size: 1.1rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 0.82rem; margin-bottom: 14px; }
+  .sub code { color: var(--accent); font-family: ui-monospace, monospace; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 14px; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .stage { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+  canvas { width: 100%; display: block; border-radius: 4px; background: #0B1116; }
+  .controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: #08110D; border: 0; border-radius: 4px;
+    font: 600 13px system-ui, sans-serif; padding: 7px 16px; cursor: pointer; min-width: 74px;
+  }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+  .time { font-family: ui-monospace, monospace; font-size: 12px; color: var(--muted); min-width: 88px; font-variant-numeric: tabular-nums; }
+  select { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 4px; padding: 5px; }
+  label.chk { color: var(--muted); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+  .tracks { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px; align-self: start; }
+  .tracks h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin: 0 0 10px; }
+  .trk { border: 1px solid var(--line); border-radius: 5px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; }
+  .trk.sel { border-color: var(--accent); }
+  .trk .name { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .trk .an { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .empty { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>Aerial Track Viewer</h1>
+<div class="sub" id="subtitle"></div>
+<div class="layout">
+  <div class="stage">
+    <canvas id="cv"></canvas>
+    <div class="controls">
+      <button id="play">Play</button>
+      <input type="range" id="scrub" min="0" value="0" step="1" aria-label="Timeline">
+      <span class="time" id="time"></span>
+      <select id="speed" aria-label="Playback speed">
+        <option value="0.5">0.5&times;</option>
+        <option value="1" selected>1&times;</option>
+        <option value="2">2&times;</option>
+        <option value="4">4&times;</option>
+      </select>
+      <label class="chk"><input type="checkbox" id="trails" checked> trails</label>
+    </div>
+  </div>
+  <div class="tracks">
+    <h2>Tracks</h2>
+    <div id="tracklist"></div>
+  </div>
+</div>
+
+<script id="track-data" type="application/json">__TRACKS_JSON__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("track-data").textContent);
+const META = DATA.meta, N = META.num_frames, FPS = META.fps;
+document.getElementById("subtitle").innerHTML =
+  (META.mode === "mock" ? "Mock pipeline (synthetic scene)" : "PLM + SAM 2 on <code>" + META.video + "</code>") +
+  " &middot; query: <code>" + META.query + "</code> &middot; " + DATA.tracks.length + " track(s), " +
+  N + " frames @ " + FPS.toFixed(0) + " fps";
+
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+cv.width = META.width; cv.height = META.height;
+const frameImgs = (DATA.frames || []).map(src => { const i = new Image(); i.src = src; return i; });
+
+let frame = 0, playing = false, last = 0, selected = null;
+const playBtn = document.getElementById("play"), scrub = document.getElementById("scrub"),
+      timeEl = document.getElementById("time"), speedEl = document.getElementById("speed"),
+      trailsEl = document.getElementById("trails");
+scrub.max = N - 1;
+
+function drawStatic(s) {
+  ctx.fillStyle = "#2E3A2C"; ctx.fillRect(0, 0, cv.width, cv.height);   // ground
+  const f = s.field; ctx.fillStyle = "#3A4433"; ctx.fillRect(f[0], f[1], f[2]-f[0], f[3]-f[1]);
+  ctx.lineCap = "round";
+  const road = (pts, w, c) => { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.stroke(); };
+  road(s.dirt_road, 26, "#6B5A41");
+  road(s.second_road, 22, "#5E5344");
+  road(s.paved_road, 30, "#3C4248");
+  ctx.setLineDash([14, 12]); road(s.paved_road, 2, "#8A939B"); ctx.setLineDash([]);
+  ctx.fillStyle = "#4A5258";
+  s.buildings.forEach(b => { ctx.fillRect(b[0], b[1], b[2]-b[0], b[3]-b[1]);
+    ctx.strokeStyle = "#242A2E"; ctx.lineWidth = 1.5; ctx.strokeRect(b[0], b[1], b[2]-b[0], b[3]-b[1]); });
+  s.trees.forEach(t => { ctx.fillStyle = "#233623"; ctx.beginPath();
+    ctx.arc(t[0], t[1], 11, 0, 7); ctx.fill(); ctx.fillStyle = "#2C452B";
+    ctx.beginPath(); ctx.arc(t[0]-3, t[1]-3, 7, 0, 7); ctx.fill(); });
+}
+
+function drawActors(f) {
+  for (const a of DATA.scene.actors) {
+    const st = a.states[f]; if (!st || !st[3]) continue;
+    const [x, y, h] = st;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(h);
+    if (a.category === "person") {
+      ctx.fillStyle = a.color; ctx.beginPath(); ctx.arc(0, 0, 4, 0, 7); ctx.fill();
+    } else {
+      const [L, W] = a.size;
+      ctx.fillStyle = a.color; ctx.fillRect(-L/2, -W/2, L, W);
+      ctx.fillStyle = "rgba(255,255,255,0.25)"; ctx.fillRect(L/2 - 7, -W/2 + 2, 5, W - 4); // windshield
+      ctx.strokeStyle = "rgba(0,0,0,0.4)"; ctx.lineWidth = 1; ctx.strokeRect(-L/2, -W/2, L, W);
+    }
+    ctx.restore();
+  }
+}
+
+function drawFrameImage(f) {
+  const idx = Math.min(frameImgs.length - 1, Math.floor(f / (META.frame_stride || 1)));
+  const img = frameImgs[idx];
+  if (img && img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0, cv.width, cv.height);
+  else { ctx.fillStyle = "#0B1116"; ctx.fillRect(0, 0, cv.width, cv.height); }
+}
+
+function drawTracks(f) {
+  for (const tr of DATA.tracks) {
+    const box = tr.boxes[String(f)];
+    const dim = selected !== null && selected !== tr.id;
+    ctx.globalAlpha = dim ? 0.25 : 1;
+    if (trailsEl.checked) {
+      ctx.strokeStyle = tr.color; ctx.lineWidth = 2; ctx.beginPath();
+      let started = false;
+      for (let i = Math.max(0, f - 90); i <= f; i++) {
+        const b = tr.boxes[String(i)]; if (!b) continue;
+        const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+        started ? ctx.lineTo(cx, cy) : ctx.moveTo(cx, cy); started = true;
+      }
+      ctx.stroke();
+    }
+    if (box) {
+      ctx.strokeStyle = tr.color; ctx.lineWidth = 2.5;
+      ctx.strokeRect(box[0], box[1], box[2]-box[0], box[3]-box[1]);
+      ctx.font = "600 12px system-ui, sans-serif";
+      const tag = "#" + tr.id + " " + tr.label;
+      const tw = ctx.measureText(tag).width;
+      ctx.fillStyle = tr.color;
+      ctx.fillRect(box[0], box[1] - 18, tw + 10, 16);
+      ctx.fillStyle = "#08110D"; ctx.fillText(tag, box[0] + 5, box[1] - 6);
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function render() {
+  if (META.mode === "mock") { drawStatic(DATA.scene.static); drawActors(frame); }
+  else drawFrameImage(frame);
+  drawTracks(frame);
+  scrub.value = frame;
+  timeEl.textContent = (frame / FPS).toFixed(1) + "s / " + ((N - 1) / FPS).toFixed(1) + "s";
+}
+
+function tick(ts) {
+  if (playing) {
+    if (ts - last > 1000 / (FPS * parseFloat(speedEl.value))) {
+      frame = (frame + 1) % N; last = ts; render();
+    }
+    requestAnimationFrame(tick);
+  }
+}
+playBtn.onclick = () => {
+  playing = !playing; playBtn.textContent = playing ? "Pause" : "Play";
+  if (playing) { last = 0; requestAnimationFrame(tick); }
+};
+scrub.oninput = () => { frame = parseInt(scrub.value, 10); render(); };
+trailsEl.onchange = render;
+
+const list = document.getElementById("tracklist");
+if (!DATA.tracks.length) list.innerHTML = "<div class='empty'>No tracks - the query matched nothing.</div>";
+for (const tr of DATA.tracks) {
+  const el = document.createElement("div");
+  el.className = "trk"; el.tabIndex = 0;
+  el.innerHTML = "<div class='name'><span class='dot' style='background:" + tr.color + "'></span>" +
+    "#" + tr.id + " " + tr.label + " <span style='color:var(--muted);font-weight:400'>&middot; t+" +
+    (tr.acquired_frame / FPS).toFixed(1) + "s</span></div>" +
+    (tr.analysis ? "<div class='an'>" + tr.analysis + "</div>" : "");
+  const toggle = () => {
+    selected = selected === tr.id ? null : tr.id;
+    document.querySelectorAll(".trk").forEach(e => e.classList.remove("sel"));
+    if (selected === tr.id) el.classList.add("sel");
+    render();
+  };
+  el.onclick = toggle;
+  el.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } };
+  list.appendChild(el);
+}
+render();
+</script>
+</body>
+</html>

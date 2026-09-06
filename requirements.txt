@@ -1,0 +1,8 @@
+# Real mode only - mock mode (run_demo.py --mock) needs nothing beyond stdlib.
+torch>=2.5.1
+torchvision>=0.20.1
+transformers>=4.52.0
+accelerate>=1.0.0
+opencv-python>=4.10
+# SAM 2 is installed from source (see README.md):
+#   git clone https://github.com/facebookresearch/sam2 && cd sam2 && pip install -e .
