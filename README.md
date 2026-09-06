@@ -80,21 +80,23 @@ plm_sam2_tracker/
   real_pipeline.py                PLM grounding + SAM 2 propagation
   viewer.py, viewer_template.html standalone HTML viewer generator
 docs/
+  index.html                                 docs landing page (Pages root)
   perceptionlm-aerial-tracking-review.html   paper review + pipeline options
   plm-tracking-sandbox.html                  in-browser pipeline sandbox
 ```
 
 ## Docs
 
-Two standalone pages (no server needed — open them in a browser):
+Two standalone pages. GitHub serves `.html` files as source, so read them
+either on GitHub Pages or by opening the local files after a clone:
 
-- [`docs/perceptionlm-aerial-tracking-review.html`](docs/perceptionlm-aerial-tracking-review.html)
-  — review of the PLM/PE papers and the four candidate pipelines, with the
-  reasoning behind the PLM-grounding + SAM 2-propagation choice this demo
-  implements.
-- [`docs/plm-tracking-sandbox.html`](docs/plm-tracking-sandbox.html)
-  — interactive sandbox: run the same acquisition / re-acquisition logic
-  against the synthetic scene and watch it step through, in the browser.
+| Page | Live | Local |
+|------|------|-------|
+| Paper review — the PLM/PE papers, four candidate pipelines ranked, and the aerial constraints that pick between them | [read](https://omerneeman.github.io/PerceptionLM-Demo/perceptionlm-aerial-tracking-review.html) | [`docs/perceptionlm-aerial-tracking-review.html`](docs/perceptionlm-aerial-tracking-review.html) |
+| Interactive sandbox — run the acquisition / re-acquisition logic against the synthetic scene in the browser | [open](https://omerneeman.github.io/PerceptionLM-Demo/plm-tracking-sandbox.html) | [`docs/plm-tracking-sandbox.html`](docs/plm-tracking-sandbox.html) |
+
+The live links need GitHub Pages switched on: **Settings → Pages → Source:
+Deploy from a branch → `main` → `/docs`**.
 
 ## Known limitations
 

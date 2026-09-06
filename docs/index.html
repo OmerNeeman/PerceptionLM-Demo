@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PLM Aerial Tracking — Docs</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --paper:#F5F7F6; --ink:#1B2733; --muted:#5B6B77; --accent:#0F7A63;
+    --accent-soft:#E3EFEA; --signal:#C77B21; --line:#D8DEDC; --card:#FFFFFF;
+    --sans:"Archivo",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --serif:"Source Serif 4",Georgia,serif;
+    --mono:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --paper:#10181E; --ink:#E3EAE7; --muted:#8FA0A8; --accent:#3BB894;
+      --accent-soft:#16302A; --signal:#E0A04A; --line:#263239; --card:#162028;
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#10181E; --ink:#E3EAE7; --muted:#8FA0A8; --accent:#3BB894;
+    --accent-soft:#16302A; --signal:#E0A04A; --line:#263239; --card:#162028;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font:400 17px/1.6 var(--serif);padding:0}
+  .wrap{max-width:760px;margin:0 auto;padding:64px 24px 80px}
+  .eyebrow{font:600 12px/1 var(--sans);letter-spacing:.12em;text-transform:uppercase;
+           color:var(--accent);margin:0 0 14px}
+  h1{font:800 40px/1.12 var(--sans);letter-spacing:-.02em;margin:0 0 16px}
+  .lede{font-size:19px;color:var(--muted);margin:0 0 8px;max-width:58ch}
+  .rule{height:1px;background:var(--line);border:0;margin:36px 0}
+  .cards{display:grid;gap:18px;grid-template-columns:1fr}
+  @media (min-width:640px){.cards{grid-template-columns:1fr 1fr}}
+  .card{display:block;background:var(--card);border:1px solid var(--line);
+        border-radius:12px;padding:24px;text-decoration:none;color:inherit;
+        transition:border-color .15s ease,transform .15s ease}
+  .card:hover{border-color:var(--accent);transform:translateY(-2px)}
+  .tag{display:inline-block;font:500 11px/1 var(--sans);letter-spacing:.09em;
+       text-transform:uppercase;color:var(--accent);background:var(--accent-soft);
+       padding:5px 9px;border-radius:5px;margin-bottom:14px}
+  .card h2{font:700 20px/1.25 var(--sans);margin:0 0 10px}
+  .card p{margin:0;font-size:15.5px;color:var(--muted);line-height:1.55}
+  h3{font:700 15px/1.3 var(--sans);letter-spacing:.01em;margin:0 0 12px}
+  pre{background:var(--card);border:1px solid var(--line);border-radius:10px;
+      padding:16px 18px;overflow-x:auto;margin:0}
+  code{font:400 13.5px/1.7 var(--mono)}
+  .note{border-left:3px solid var(--signal);padding:2px 0 2px 16px;
+        color:var(--muted);font-size:15.5px;margin:28px 0 0}
+  footer{margin-top:44px;padding-top:22px;border-top:1px solid var(--line);
+         font-size:14.5px;color:var(--muted)}
+  a.plain{color:var(--accent);text-decoration:none;border-bottom:1px solid transparent}
+  a.plain:hover{border-bottom-color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">PerceptionLM &middot; SAM 2 &middot; Aerial</p>
+  <h1>PLM Aerial Tracking</h1>
+  <p class="lede">Review and working demo of a two-model pipeline: PerceptionLM
+  grounds a target from a text description, SAM 2 propagates it as a track,
+  PLM-style analysis describes what each track did.</p>
+
+  <hr class="rule">
+
+  <div class="cards">
+    <a class="card" href="perceptionlm-aerial-tracking-review.html">
+      <span class="tag">Paper review</span>
+      <h2>PerceptionLM for Aerial Tracking</h2>
+      <p>What the PLM and Perception Encoder papers actually deliver, four
+      candidate pipelines ranked by value for effort, and the aerial-specific
+      constraints that decide between them.</p>
+    </a>
+    <a class="card" href="plm-tracking-sandbox.html">
+      <span class="tag">Interactive</span>
+      <h2>PLM Tracking Sandbox</h2>
+      <p>Run the acquisition and re-acquisition logic against a synthetic
+      aerial scene in the browser, and watch the pipeline step through it
+      frame by frame.</p>
+    </a>
+  </div>
+
+  <hr class="rule">
+
+  <h3>Run the demo</h3>
+  <pre><code>git clone https://github.com/OmerNeeman/PerceptionLM-Demo.git
+cd PerceptionLM-Demo
+python3 run_demo.py --mock
+xdg-open output/viewer.html</code></pre>
+
+  <p class="note">Mock mode is pure standard library — no GPU, no model
+  downloads, no installs. It simulates the pipeline's <em>logic</em>
+  (grounding, propagation, re-acquisition, analysis), not model behaviour.</p>
+
+  <footer>
+    Source and real-mode instructions:
+    <a class="plain" href="https://github.com/OmerNeeman/PerceptionLM-Demo">github.com/OmerNeeman/PerceptionLM-Demo</a>
+  </footer>
+
+</div>
+</body>
+</html>
