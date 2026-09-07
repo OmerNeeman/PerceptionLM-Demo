@@ -30,7 +30,7 @@ ever returned a correct result.
 |---|---|---|---|---|
 | S0 | **Env bring-up + embedder bake-off** | F-0, F-2, F-3, N-3 | — | new session |
 | S1 | **Source classifier + inventory** | D-1, D-2 | — | subagent |
-| S1a | **Config + device abstraction** | **N-8** | S1 | subagent |
+| S1a | **Config + device abstraction** + draft `INSTRUCTIONS.md` (setup half) | **N-8**, N-9 (part) | S1 | subagent |
 | S2 | **Tile planner + geo round-trip** | F-1, D-3, D-4, F-10 | S1a | subagent |
 | S3 | **Embedding pipeline (one AOI)** | F-1a, F-2, N-2, N-4 | S0, S2 | new session |
 | S4 | **Retrieval core** | F-3, F-4, F-5, F-6, **F-2a**, N-1 | S3 | subagent |
@@ -64,6 +64,22 @@ Do not re-run the survey.
 (`vlm_logs` prompts were "tents" / "find all tents in the frame"), it has
 individually identifiable cars, and it is the canonical demo input in the
 sibling project's own docs.
+
+### `INSTRUCTIONS.md` is written in three touches, not one
+
+Each touch happens when its content first becomes **true**, because a
+portability document written ahead of portable code is fiction:
+
+1. **At S1a** — install, environment, data-root config, and the device/dtype
+   rules. This is the half that is genuinely cross-platform and testable as
+   soon as N-8 lands, and it is the half most likely to block a foreign
+   machine.
+2. **At M1 (after S5)** — the real run commands: build an index, query it,
+   produce the export. Written from commands that have actually been run.
+3. **At S9** — **verified by execution.** A fresh session with no access to
+   this conversation follows it on a foreign machine and reports where it got
+   stuck. Anything it had to ask is a defect in the document, not a question to
+   answer in chat.
 
 **S1a exists because portability is a code property, not a documentation
 task** *(owner request, 2026-09-07)*. An audit of S0's and S1's output found
