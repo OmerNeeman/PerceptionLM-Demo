@@ -366,3 +366,63 @@ owner's qualitative gate was going to be anyway.
   exported.
 - **Dense-CLIP surgery stays out of the loop** (owner: "keep it outside the
   loop for now"). Recorded as future work only.
+
+---
+
+## arch-confirm — 2026-09-07 — encoder-only confirmed; the decoder/MaxSim trap
+
+Owner asked directly whether we are aligned on using **only the Perception
+Encoder** and not PerceptionLM's generative half, and supplied context arguing
+for (1) contrastive vision encoders rather than LLM decoders, (2) multi-vector
+indexing, ColPali style, and (3) late interaction / MaxSim over patch tokens.
+
+**Aligned on (1).** PE Core's two towers only; no Llama decoder in the
+pipeline. Additional reason beyond compute waste: PLM has no text tower
+aligned to its image features, so `cos(text, tile)` is undefined for it.
+Retrieval was never something PLM could do.
+
+**Aligned on (2), and it is already the design.** The 448/224/112 pyramid *is*
+N vectors per image — one per tile per scale, 11,109 for a single 10240^2
+scene. "One for the global thumbnail and one for each dynamic tile" is what is
+specced.
+
+**(1) and (3) are mutually incompatible — this is the key point.** ColPali's
+MaxSim does not run on the *vision encoder's* patch tokens. It runs on the
+**LLM decoder's output token embeddings**: PaliGemma projects SigLIP patch
+embeddings into Gemma-2B's text vector space, and the authors state this is
+the load-bearing step — "One benefit of inputting image patch embeddings
+through a language model is that they are natively mapped to a latent space
+similar to the textual input (query). This enables leveraging the ColBERT
+strategy." The control experiment that bypasses the decoder is **ColSigLIP:
+2.5 nDCG@5** vs 81.3 for ColPali and 51.4 for pooling.
+
+So "pure vision encoder + patch-token MaxSim" is precisely the 2.5
+configuration. Note also that ColPali-style retrieval is **not** cheap: it
+requires running a 2B decoder over 1,024 patch tokens per tile at index time —
+the very cost (1) seeks to avoid.
+
+**Measured cost comparison (PM computed):**
+
+| | one AOI, 11,109 tiles | all 8 scenes, 108,542 |
+|---|---|---|
+| PE Core pooled | **28 MB**, ~7 min | **278 MB**, ~72 min |
+| ColQwen2.5 patch tokens | 2.91 GB, ~1.2 h | 28.45 GB, ~11.8 h |
+| + ColBERTv2 20 B/vec | 0.23 GB | 2.22 GB |
+
+102x the storage. Even compressed, one AOI is 14x over the 16 MB export cap,
+so the shareable HTML deliverable would be lost.
+
+**Same diagnosis, different remedy.** The owner's diagnosis — a tiny car's
+representation is diluted by the surrounding tile — is correct. Two fixes
+exist: un-dilute the representation (patch tokens, needs the decoder), or
+reduce what dilutes it (shrink the tile). At 112 px a car is **5.9% of the
+tile instead of 0.37%** — a 16x gain in signal fraction, achieved with the
+only text-aligned representation PE Core exposes.
+
+**Unchanged decision:** encoder-only pooled pyramid for the build; ColQwen2.5
+late interaction stays queued as **F-11**, an A/B on one AOI after retrieval
+works, with the static export knowingly traded away if it wins. The owner is
+right that multi-vector late interaction is SOTA for micro-detail; the
+reservations are that it needs the decoder, costs 102x, and its only
+off-the-shelf form was tuned on 127,460 *document* query-page pairs, so aerial
+transfer is unmeasured.

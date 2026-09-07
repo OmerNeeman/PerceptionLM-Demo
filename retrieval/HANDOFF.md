@@ -82,12 +82,23 @@ export CUDA_VISIBLE_DEVICES=0    # GPU 1 drives the desktop
 - **Ground distances need the Web Mercator correction.** `gdalinfo` prints
   12.5 cm/px for the `leb` scenes; the true ground GSD is **10.47 cm/px**
   (multiply by cos(latitude)). Uncorrected figures are 19.4% too large.
-- **Retrieve on pooled embeddings, not patch tokens.** PE-Core's patch tokens
-  are 1536-d and never entered its contrastive objective. The published
-  attempt at retrieving on a CLIP tower's patch tokens scored 2.5 nDCG@5
-  against 51.4 for simply pooling. `notes.md#research-1` has the citations.
-  Small objects are handled by **multi-scale crops** — 448/224/112 px — not by
-  patches.
+- **Retrieve on pooled embeddings, not patch tokens.** This looks like an
+  oversight and is not — it was argued twice and settled on published
+  evidence. PE-Core's patch tokens are 1536-d and never entered its
+  contrastive objective; the 1280-d text-aligned space exists only after
+  attention pooling. MaxSim over a CLIP tower's patch tokens is **ColSigLIP:
+  2.5 nDCG@5**, against 51.4 for simply pooling.
+
+  ColPali-style late interaction works only because patch embeddings pass
+  **through an LLM decoder** into its text token space — "this enables
+  leveraging the ColBERT strategy," in the authors' words. So "bypass the
+  decoder **and** do patch MaxSim" is exactly the 2.5 configuration. You must
+  pick one. We picked the encoder-only path.
+
+  Small objects are handled by **multi-scale crops** — 448/224/112 px. At
+  112 px a car is 5.9% of the tile instead of 0.37%, a 16x gain in signal
+  fraction, using the only representation that is actually text-aligned.
+  Citations in `notes.md#research-1` and `notes.md#arch-confirm`.
 
 ## What the owner cares about
 
