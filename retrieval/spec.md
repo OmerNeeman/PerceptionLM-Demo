@@ -19,15 +19,87 @@ not a scalar; see `notes.md#research-1`), `OVERLAP` (default 0.0),
 A raster is source imagery iff it has >= 3 bands AND its sampled pixel values
 show > 64 distinct levels in each of bands 1-3. Derived rasters (binary masks,
 class rasters, fused CD output) are excluded.
-*Expected:* on `leb`, exactly 2 of 31 rasters qualify — `2022-10-29.tif` and
-`2025-06-06.tif`. The classifier must return exactly that set, by value
-inspection, never by filename pattern.
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-07.**
+> **Was:** "*on `leb`, exactly 2 of 31 rasters qualify — `2022-10-29.tif` and
+> `2025-06-06.tif`. The classifier must return exactly that set.*"
+> **Why amended, not sent back:** the clause is **factually false about the
+> rule in D-1's own first sentence**, so no faithful implementation can satisfy
+> both. `leb/leb_crop_x4096_y3072_1024.tif` is real 3-band EPSG:3857 imagery
+> with distinct counts `[236,246,255]` — it passes `> 64` in all three bands on
+> any sampling strategy. Its mtime is 2026-08-20, **two and a half weeks before
+> this project began**, so it is pre-existing data: the number was always
+> wrong, not made wrong. Recon measured *indexable scenes* and recorded it as
+> *qualifying rasters*.
+> **Independent confirmation** (methodology §3 requires it for a measurable
+> criterion): an adversarial reviewer with fresh context ruled the clause
+> genuinely wrong **after first arguing the opposite case and finding it fails
+> on three independent grounds** — the two-predicate split is already required
+> by S1's brief (`gaza.tiff` must be source-but-not-indexable) and by
+> `docs/DATA.md` (which calls `Teheran/` "66 source"); the clause contradicts
+> D-1's own rule on real data; and it is the third measurement error found in
+> the same recon, all erring the same direction. PM independently verified the
+> crop's byte-identity (md5 `e3b380b8e5c3`) and the 31 denominator.
+> **Nothing was weakened** — the spec now pins *two* exact sets where it
+> previously pinned one, so this is strictly more checkable than before.
+
+*Expected:* on `leb`, exactly **2 of 31** rasters are **indexable source
+scenes** — `2022-10-29.tif` and `2025-06-06.tif`. The pixel rule alone accepts
+**4** rasters under `leb/`: those two, plus `leb_crop_x4096_y3072_1024.tif`
+(real 3-band EPSG:3857 imagery, byte-identical to the 1024x1024 window of
+`2022-10-29.tif` at pixel offset (4096, 3072), rejected as `duplicate_of` /
+`contained_crop`) and `tmp_results/cls_leb_legend.png` (a 357x233 colour
+legend, rejected as `no_georeference`).
+
+Being source imagery is **necessary but not sufficient** to be indexable; the
+two predicates are reported separately, and every rejection carries one of the
+five specific causes (`derived_raster`, `too_few_bands`, `no_georeference`,
+`resolution_regime_excluded`, `duplicate_of`).
+
+The pixel-rule decision must be made by value inspection, **never by filename
+pattern** — asserted over **renamed symlinks**, which is the only assertion
+that actually catches a filename dependency (a naive date-regex fast path
+passes the obvious test).
+
+> **Known exposure, deliberately not fixed** (tech-debt, `plan.md`): D-1's rule
+> tests for *photographic value statistics*, not for *being real imagery*.
+> Three segmentation **visualisations** in the tree
+> (`iran/*_seg_vis.png`) pass it, and are excluded only incidentally because
+> PNG carries no georeference. Written as GeoTIFFs at 10 cm they would be
+> indexed as source. Uniform random noise also passes.
 
 **D-2 — All reported ground distances are true ground metres.**
 For any Mercator CRS, ground distance = projected distance x cos(latitude).
 *Expected:* for `leb` (EPSG:3857, lat 33.10707, pixel 0.125002 m) the reported
 GSD is 10.47 cm/px +/- 0.01 and a 448 px tile reports 46.91 m +/- 0.05. A
-result of 12.5 cm/px or 56.0 m is a failure, not a rounding difference.
+result of 12.5 cm/px or 56.0 m is a failure, not a rounding difference. For the
+UTM scenes (EPSG:32636) the reported GSD is 10.00 cm/px and a 448 px tile
+44.80 m, with **no** cosine correction — applying it there (giving ~8.4 cm) is
+exactly as wrong as omitting it from a Mercator scene.
+
+> **STRENGTHENED — owner signed off 2026-09-07.** *Added, not relaxed.*
+> **Every reported ground resolution is cross-checked against an independent
+> ellipsoidal geodesic measurement, and disagreement beyond a stated tolerance
+> fails loudly** — naming both figures and the CRS, never falling back to
+> either silently.
+> *Why:* the analytic rule above is **over-general**. `cos(latitude)` is correct
+> only for a Mercator whose standard parallel is the equator; for `lat_ts != 0`
+> the factor is `cos(lat)/cos(lat_ts)`. Measured: EPSG:3994 (Mercator 41) is
+> **24.5% wrong**, `+proj=merc +lat_ts=45` **29.3% wrong**, and Hotine Oblique
+> Mercator is misclassified as Mercator and given a cosine it should not get.
+> No scene in the corpus is affected, and the code faithfully implements the
+> rule — so this is not a compliance failure but a latent trap of exactly the
+> class trap 3 exists to prevent.
+> *Why a guard rather than a longer formula:* the geodesic value is **already
+> computed for every raster and then discarded**. An independent reviewer found
+> it agreed with its own ellipsoidal measurement in **100% of probes across Web
+> Mercator, three UTM zones and geographic, to all printed digits**. Real
+> agreement is within **0.17%**; the failure cases diverge by **24-29%**. So one
+> assertion catches every bad projection — including ones nobody enumerated —
+> for free.
+> *Expected:* the tolerance is stated and justified from that evidence; all
+> eight indexable scenes pass it; a secant-Mercator CRS raises. **Failing loudly
+> is the requirement** — a silently 25%-wrong ground measurement is the outcome
+> being prevented.
 
 **D-3 — The data directory is read-only.**
 No process writes, moves, renames or converts anything under
@@ -402,8 +474,8 @@ absent content is the failure mode this exposes.
 | F-2a | `test_pca_export_roundtrip` — basis stored and re-projectable; retrieval@10 overlap full-precision vs exported, **reported per scale** |
 | E-1a | by-eye vehicle verdict on saved top-10 crops (no labels exist; non-gating) |
 | F-11 | *optional (S8)* — same E-1 table for ColQwen2.5 side by side |
-| D-1 | `test_source_classifier` — exactly 2 of 31 leb rasters, by value inspection |
-| D-2 | `test_gsd_correction` — 10.47 cm/px, 46.91 m tile; rejects 12.5/56.0 |
+| D-1 | `test_source_classifier` — the **indexable** pair exactly; `test_d1_pixel_rule_over_leb` — the **4-member** pixel-rule set exactly; both by value inspection, plus a renamed-symlink assertion |
+| D-2 | `test_gsd_correction` — 10.47 cm/px, 46.91 m tile; rejects 12.5/56.0; `test_gsd_no_correction_for_utm` — 10.00 cm, 44.80 m; `test_ground_resolution_geographic` — a real EPSG:4326 raster in metres, fails if degrees are returned; `test_gsd_guard_fires_on_secant_mercator` |
 | D-3 | `test_data_dir_readonly` — output paths + tree checksum unchanged |
 | D-4 | `test_tile_id_stable` — two builds, identical ids |
 | D-5 | U-5 copy assertion + spec review |

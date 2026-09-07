@@ -63,13 +63,52 @@ Do not promise those in the UI (spec U-5).
 
 ## Source vs derived — the rule is measured, not heuristic
 
-**Every derived raster in this tree has <= 6 distinct values per band. Every
-source raster has 187-256.** Classify by value distribution and band count,
-**never by filename.**
+> **CORRECTED 2026-09-07 by S1 + adversarial review.** Three figures in the
+> original text of this section were wrong. The rule itself is sound and
+> unchanged; only these numbers move. Superseded text kept visible below so
+> nobody re-derives from the old ones.
 
-On `leb`, exactly **2 of 31** rasters are source imagery. Outside `leb`, only
-**12 of ~232**. Getting this wrong produces a plausible-looking index that is
-silently meaningless.
+**Classify by value distribution and band count, never by filename.** The
+threshold is `>= 3 bands` AND `> 64 distinct levels in each of bands 1-3`.
+
+**Measured margin (dense sampling — 24x24 grid of 256x256 windows):**
+
+| | value | where |
+|---|---|---|
+| ceiling among **3-band derived** rasters (the ones that actually reach the distinct-level test) | **20** | `leb/cache/2022-10-29_ST_output.tiff` |
+| ceiling among **all** non-source rasters | **32** | the 1-band label raster — corroborated by its own `ID_TO_LABEL_MAPPING` tag declaring 45 classes, 31 present |
+| **threshold** | **64** | |
+| floor among **source** rasters | **183** | `Teheran/x5_y7.tif` |
+
+So the threshold sits **3.2x above** the real ceiling of rasters that can reach
+it and **2.9x below** the source floor. Wide, and now measured densely rather
+than sampled.
+
+~~"every derived raster has <= 6 distinct values per band"~~ — **wrong.** The
+true ceiling is 20 (3-band) / 32 (all). An intermediate correction to "<= 25"
+was also wrong: 25 was a sparse-sampling artifact.
+
+**Counts, dense-measured:** 320 files, **270 readable rasters** (266 TIFF +
+4 PNG). **85 pass the pixel rule** · **81 are real imagery** · **78 unique
+after dedup** · **77 unique aerial scenes** · **8 indexable**.
+
+~~"12 of ~232 rasters are real imagery"~~ — **wrong by ~6x.** The `12` was the
+non-`leb` count *with `Teheran/`'s 66 silently omitted* — even though this same
+file's exclusion table calls them "66 source", and `notes.md#recon-2`'s own
+scale-regime table sums to 76. **The "74 unique source scenes" figure in
+`notes.md#recon-2` was the sound one; its "12 of ~232" was the error.**
+
+**Careful with "passes the pixel rule" vs "is real imagery":** 4 of the 85 are
+not imagery at all — one colour legend and three segmentation *visualisations*
+(`iran/*_seg_vis.png`). They pass because the rule tests for photographic value
+statistics, not for provenance, and they are excluded only incidentally because
+PNG carries no georeference. Written as GeoTIFFs at 10 cm they would be indexed
+as source. See `spec.md` D-1's known-exposure note.
+
+On `leb`: **65 files, 31 `.tif`/`.tiff`, 4 pass the pixel rule, 2 are
+indexable.** (~~"2 of leb's 50 TIFFs, the other 48 derived"~~ in
+`notes.md#intake` is wrong on both figures.) Getting this wrong produces a
+plausible-looking index that is silently meaningless.
 
 ---
 
@@ -77,6 +116,7 @@ silently meaningless.
 
 | What | Cause |
 |---|---|
+| `sin/sin_min.tiff` | **Omitted from this table until 2026-09-07.** 759x1095, 4 bands, **EPSG:4326** (not 3857), true GSD **408.3 cm** — a thumbnail/overview of the Sinai scene, same excluded regime. Costs nothing to exclude, but it is one of only **two geographic-CRS rasters** in the tree, so it is a live exercise of the `crs_kind == "geographic"` code path. |
 | `sin/Sini_Oct_Det_2025.tif` | 65536x98304, 6.44 Gpx, **true GSD 415.7 cm** (4.08-4.23 m across the scene). A 448 tile spans 1.86 km; nothing man-made resolvable. Was **86% of the nominal tile budget**. Shares EPSG:3857 with `leb` at 40x different scale — a trap. No overviews. |
 | `Teheran/` (66 source) + `iran/x1_y7.tif` | **50 cm/px**, EPSG:32639. A 448 tile spans 224 m — a city block. Vehicles not resolvable. Admissible later as a **separate coarse tier**, never in the same embedding space (25x the ground area per tile). |
 | `gaza.tiff` (loose) | **Not aerial.** 1600x800, no CRS, no geotransform. A ground-level oblique press photograph of armour with the Gaza skyline. A web/UI asset. |

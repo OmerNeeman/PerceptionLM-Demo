@@ -722,3 +722,141 @@ would be fiction.
 **(2) Commit and push authorised by the owner**, 2026-09-07. Branch-per-stage
 still holds; `main` stays protected and is reached by merge, not by direct
 commit.
+
+---
+
+## s1-review — 2026-09-07 — S1 sent back; D-1 amended, D-2 strengthened
+
+Stage S1 returned `BLOCKED` on its brief's own named condition — correctly. It
+did **not** tune a test to hide a mismatch, which is the behaviour the handback
+protocol exists to produce.
+
+### PM verification, before any adjudication
+
+- Re-ran the suite: **21 passed**.
+- `leb` recursive: **65 files, 31 `.tif`/`.tiff`** — denominator confirmed as
+  **31**.
+- The contested crop: **byte-identical** to the (4096, 3072) 1024x1024 window
+  of `2022-10-29.tif`, md5 `e3b380b8e5c3` both, and **not** matching
+  `2025-06-06.tif`. Distinct counts `[236,246,255]`, so it genuinely passes
+  `> 64`.
+- Derived-raster distinct-value ceiling: 16 among `derived_raster` records on
+  the sampled grid, 5 records exceeding 6. So "<= 6" is wrong.
+
+### The independent reviewer
+
+Dispatched because methodology §3 requires independent confirmation for an
+amendment to a **measurable** criterion — owner-alone is explicitly weak, and
+this is the most gameable rule in the methodology.
+
+**Verdicts:** spec compliance **PASS** on D-1 (rule), D-2, D-3, D-4; code
+quality **PASS with findings**. It **mutated the implementation 16 ways and 15
+were caught by the semantically correct test** — no born-green, tautological or
+self-asserting test found. It attacked the classifier with 20 constructed
+fixtures — real imagery behind three derived-looking names, masks behind date
+names, both sides of the `> 64` boundary, 2-band real imagery, 4-band with
+constant alpha — and **could not make it read a filename**. That is the
+strongest part of S1 and it is now explicitly out of scope for changes.
+
+Two observations worth keeping:
+- The mutation `all()` -> `any()` was caught **only** by a one-line pure-rule
+  unit test (`passes_pixel_rule(3, [238, 245, 3]) is False`). Every data-driven
+  test still passed, because on real rasters a band that passes usually means
+  all bands pass. **The most trivial-looking line in the file is the sole guard
+  against a real semantic inversion.** Argument for keeping cheap unit tests
+  next to data-driven ones.
+- The reviewer named where it might have been led: the phrase "conflates two
+  predicates" is rhetorical, and it did not accept it on that basis. What
+  convinced it were two things the framing did not supply — the crop's
+  **mtime** (pre-existing, so the number was always wrong) and the **brief's
+  own** requirement that `gaza.tiff` be source-but-not-indexable.
+
+### AMENDMENT — D-1's *Expected* clause. Owner signed.
+
+Ruled **genuinely wrong**, not merely unmet. Reasoning in `spec.md`'s amendment
+block. The key point: the clause contradicts **D-1's own first sentence** on
+real data, so no faithful implementation satisfies both.
+
+**Nothing was weakened.** The spec now pins **two** exact sets (the 4-member
+pixel-rule set and the 2-member indexable set) where it previously pinned one —
+strictly more checkable. The "never by filename" requirement stays attached to
+the pixel rule with the renamed-symlink assertion named, both conditions the
+reviewer set for accepting.
+
+### STRENGTHENED — D-2 gains a geodesy cross-check. Owner signed.
+
+The analytic rule is over-general: `cos(lat)` is right only for Mercator with
+standard parallel at the equator. EPSG:3994 is **24.5% wrong**,
+`+proj=merc +lat_ts=45` **29.3%**, and Hotine Oblique Mercator is misclassified
+and given a cosine it should not get. `spec.md` D-2 states the same
+over-general rule, so the code faithfully implements the spec — a latent trap
+of exactly the class trap 3 exists to prevent.
+
+The fix is nearly free because `geo.py` **already computes a geodesic GSD for
+every raster and throws it away**. The reviewer found it agreed with its own
+independent ellipsoidal measurement in **100% of probes** across Web Mercator,
+three UTM zones and geographic, to all printed digits. Real agreement is within
+**0.17%**; failures diverge **24-29%**. One assertion catches every bad
+projection, including ones nobody enumerated.
+
+Chosen over generalising the formula because failing loudly is the honest
+outcome for an unhandled projection, and the formula can be extended later if
+such imagery ever arrives.
+
+### SEND-BACK — two findings closed before later stages depend on them
+
+Neither is a spec failure; both are latent defects sitting directly under
+planned work.
+
+1. **The duplicate content check verified 0.0005% of the raster.**
+   `_same_pixels` compared 16 windows of 8x8 px = 1,024 px/band. The reviewer
+   built two rasters differing in **99.5% of values** that agree at exactly
+   those windows, and got `duplicate_of` — **a genuinely distinct scene
+   silently dropped from the index.** Trigger is not exotic: same-footprint
+   scenes with large nodata regions covering the sample points, and this tree
+   holds scenes 25.1% and 14.2% zero-fill. **F-7 depends on this logic.**
+   *The live case was verified safe:* all 16 windows differ between `leb`'s two
+   dated scenes, so the multi-date pair survives — and the hazard the
+   implementer described is real, since the pair does share identical bounds
+   and a bounds-only rule would collapse it.
+2. **The geographic-CRS branch had no test at all** — the **one mutant of 16
+   that survived**. Replacing metres with degrees at `geo.py:193` still gave
+   `21 passed`. Two EPSG:4326 rasters already flow through it, one of them
+   **E-1's primary label raster**, whose GSD would read `0.00011 cm` instead of
+   `12.17 cm` — a factor of ~111,000 — unnoticed. **E-1 depends on this path.**
+
+Also in the send-back: use the discarded geodesy as D-2's guard, and three
+trivia — `_bounds` is dead **and** wrong (anchors at `(0,0)` not the transform
+origin), a docstring says 32,768 where the real value is 262,144, and
+`S1_result.md` quotes full-raster distinct counts as if they were the recorded
+sampled ones.
+
+### The first fix attempt died, and its work was worse than nothing
+
+Killed mid-Fix-1 by a spend limit. It had written **132 lines of test code and
+no source change**, and **its tests passed against the unfixed code** — so its
+"adversarial" fixtures were not adversarial. It never validated that its
+fixture defeated the current implementation.
+
+PM reverted them and verified the defect is live:
+`_same_pixels(G2, G1) -> True` on rasters differing in 99.5% of values.
+
+*Lesson, now written into the brief as a mandatory step:* **validate the
+fixture before trusting the test.** Generate the pair, assert `_same_pixels`
+returns `True` against the **unfixed** code, paste it — *that* is the RED — and
+only then fix. Encoded permanently as a fixture self-check so the pair cannot
+silently stop being adversarial when sampling constants change.
+
+Its one good idea was kept: **two** adversarial pairs at different scales, one
+agreeing on the entire primary sampling grid, so the test cannot be satisfied
+by merely enlarging the sample.
+
+Re-dispatched on a **cheaper model** to stay under the spend limit, with the
+order changed to Fix 2 -> 3 -> 4 -> 1 so an interruption cannot cost
+everything again.
+
+### Manifest corrections (documentation, not spec)
+
+`docs/DATA.md` and `CLAUDE.md` corrected on three measured claims, using the
+reviewer's **dense** figures rather than sampled ones. Superseded text left
+visible so nobody re-derives from it. Details in `docs/DATA.md`.

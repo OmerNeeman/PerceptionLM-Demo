@@ -180,7 +180,7 @@ never burn past it.
 | gate | **approved** | owner signed spec, F-7 amendment, `sin` exclusion, E-1 upgrade | — |
 | anchor | **ratified** | primary user = owner scoping a product; licence fork and query vocabulary settled | `CLAUDE.md` pending flag removed |
 | S0 | **GREEN** | **RemoteCLIP-ViT-L-14 (768-d) chosen by measurement.** PM re-ran 12/12 and re-read the vehicle crops independently; both worker concerns put to owner and decided; licence verified Apache 2.0 | — |
-| S1 | **in flight** | brief written (`briefs/S1.md`) and dispatched | PM verification on handback |
+| S1 | **sent back** | returned `BLOCKED` correctly. PM verified (21 green, md5 + denominator re-measured); adversarial reviewer mutated the code 16 ways, **15 caught**, and could not make the classifier read a filename. D-1 amended + D-2 strengthened, both owner-signed | `briefs/S1_fix.md` re-dispatched on a cheaper model after the first attempt died on a spend limit |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 | S2 | brief written | `briefs/S2.md` drafted; PM verified F-1's arithmetic independently (108,542 / 1,012 / 11,109 all exact) | dispatch after S1a |
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |
@@ -209,7 +209,9 @@ amendment.
 |---|---|---|---|---|
 | ~~1~~ | ~~RemoteCLIP's licence terms are unverified~~ | **DISCHARGED 2026-09-07, same day.** Verified **Apache 2.0** at the upstream repo. No licence cost to the measured winner; the fallback was never needed | — | — |
 | 2 | **Training-corpus provenance not diligenced.** RemoteCLIP's weights are Apache 2.0, but its training corpora (RET-3 / SEG-4 / DET-10, aggregated from third-party remote-sensing datasets) do not state their own terms | Irrelevant to a scoping demo; relevant to a commercial launch. Diligencing dataset lineage is a legal task, not an engineering one, and would stall M1 for a question M1 exists to inform | One legal review, only if the product is built. Does not affect the demo, the index, or any spec criterion | Owner sign-off needed if carried past a build decision |
-| 3 | `accelerate` 1.14.0 installed but unused — no candidate needed sharded loading | Installed speculatively during S0 before that was known | Negligible; one unused package in the env. Recorded so a future reproducibility audit does not treat it as load-bearing | PM, low-cost |
+| 3 | **Sub-pixel-offset duplicates fail open.** A duplicate shifted 0.5 px (5 cm) is admitted, so the same ground is indexed twice | The dedup offset test requires integrality to 1e-3 px. Fixing it means resampling comparison, which is real work; the consequence is an inflated index and slightly skewed retrieval, not lost data — unlike finding 1, which silently *dropped* a scene and is being fixed | Duplicate tiles in results. Plausible route in is a re-gridded export, which the corpus does not currently contain | Owner sign-off needed if it ever appears |
+| 4 | **D-1 cannot distinguish derived output from imagery.** Three segmentation visualisations pass the pixel rule; so does uniform random noise | The rule tests photographic value statistics, not provenance — that is what makes it filename-independent, which is the property worth far more. The three are excluded incidentally (PNG carries no georeference) | If such a file ever arrives as a georeferenced 10 cm GeoTIFF it would be indexed as source — the project's signature failure. Recorded in `spec.md` D-1 as a known exposure | PM; escalate if the corpus gains georeferenced visualisations |
+| 5 | `accelerate` 1.14.0 installed but unused — no candidate needed sharded loading | Installed speculatively during S0 before that was known | Negligible; one unused package in the env. Recorded so a future reproducibility audit does not treat it as load-bearing | PM, low-cost |
 
 Neither is an unmet spec criterion.
 

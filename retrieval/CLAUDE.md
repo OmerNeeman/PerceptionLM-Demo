@@ -162,10 +162,22 @@ PE Core (Apache 2.0) is not.
   `/home/omer/PycharmProjects/Dynamic-Terrain/data` belongs to another
   project. Never write, move, or convert in place. Derived artifacts
   (COGs, tiles, embeddings) go under `retrieval/index/`, which is gitignored.
-- Source imagery only. In `leb`, 2 of 50 TIFFs are real RGB; the other 48
-  are derived model outputs. Indexing a binary mask as if it were imagery is
-  a correctness bug — every worker must verify band count and value
-  distribution, not trust filenames.
+- Source imagery only. In `leb`, **31** rasters: **4 pass the pixel rule, 2
+  are indexable**; the rest are derived model outputs. (An earlier "2 of 50
+  TIFFs, the other 48 derived" was wrong on both figures — corrected
+  2026-09-07 by S1.) Indexing a binary mask as if it were imagery is a
+  correctness bug — every worker must verify band count and value
+  distribution, **never** filenames.
+- **The rule:** `>= 3 bands` AND `> 64 distinct levels in bands 1-3`. Dense
+  measurement puts the real margin at **20 -> 64 -> 183** (ceiling of 3-band
+  derived, threshold, floor of source). An older "<= 6 distinct values per
+  derived band" claim was too strong; so was a correction to "<= 25", which was
+  a sampling artifact.
+- **Passing the pixel rule is not the same as being imagery.** It tests
+  photographic value statistics, not provenance: three segmentation
+  visualisations and uniform random noise pass it. Georeference, regime and
+  duplicate checks are what make a raster *indexable*, and each rejection
+  carries its own specific cause.
 - Determinism: fixed seeds, pinned model revisions, embeddings written with
   the model id and revision recorded alongside them.
 - Structured logging at stage boundaries. No catch-and-silence.
