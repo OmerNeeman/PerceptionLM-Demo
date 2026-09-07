@@ -860,3 +860,63 @@ everything again.
 `docs/DATA.md` and `CLAUDE.md` corrected on three measured claims, using the
 reviewer's **dense** figures rather than sampled ones. Superseded text left
 visible so nobody re-derives from it. Details in `docs/DATA.md`.
+
+---
+
+## s1-green — 2026-09-07 — S1 gated after the send-back
+
+**S1 is GREEN.** All four fixes closed; **39 tests pass on the PM's own re-run.**
+
+### PM verification — against the reviewer's fixtures, not the worker's
+
+This distinction mattered: the *first* fix attempt produced tests that passed
+against unfixed code, so worker-authored fixtures had already proved
+untrustworthy once. Every check below uses either the adversarial reviewer's
+original files or the real corpus.
+
+| Check | Result |
+|---|---|
+| Reviewer's `G1`/`G2` (differ in 99.5% of values) | `_same_pixels -> False` — **defect fixed** |
+| `leb_crop` vs `2022-10-29.tif` (true contained duplicate) | `True` — still caught |
+| `leb/2022-10-29` vs `leb/2025-06-06` (the multi-date pair) | `False` — **not merged**, F-7 safe |
+| `tile_cropped_…` (EPSG:4326, E-1's label raster) | 0.12167 m — **metres, not degrees** |
+| `sin/sin_min.tiff` (EPSG:4326) | 4.08326 m — matches the manifest |
+| Geodesy guard on EPSG:3994 | raises `GsdGuardError`, 24.6% > 1.5%, naming both figures and the CRS |
+| Guard on the 8 indexable scenes | silent; all 8 present with correct GSD (0.1047 Mercator / 0.1000 UTM) |
+| Inventory determinism | byte-identical across two fresh rebuilds |
+| Data tree | untouched |
+
+### What the fix actually did
+
+`_same_pixels` now streams a **full** comparison of the overlap in 512-row
+strips with early exit, keeping footprint containment as the cheap pre-filter.
+**Cost was the open question and it is a non-issue:** full inventory 8.98 s ->
+9.08 s, because genuinely different scenes diverge almost immediately — the
+early exit does the work.
+
+Two adversarial pairs guard it at different scales, so the test cannot be
+satisfied by merely enlarging the sample. Notably the worker **caught its own
+second pair being non-adversarial** (it matched the primary grid but not the
+dedup grid the deployed code actually samples) and rebuilt it by taking the
+union. That is precisely the discipline the previous attempt lacked, and it is
+the reason to keep the fixture-validity step in every future brief.
+
+Guard tolerance **1.5%**, justified from measurement rather than taste: real
+agreement <= 0.17%, known failures 24-29%. Nothing lives in between.
+
+### Cost of the review, and whether it was worth it
+
+The adversarial review plus a send-back cost roughly one extra stage of
+wall time and two dispatches. It bought: a silently-dropped-scene bug that
+would have surfaced as a corrupted date filter at F-7; a 111,000x GSD error
+latent under E-1; three false "measured fact" claims in the manifest; and a
+spec criterion that contradicted its own rule. **Keep the mandatory reviewer
+for S3 and S4** — `CLAUDE.md` already marks them as the high-risk stages, and
+this is the evidence for why.
+
+### Schema note for later stages
+
+`index/inventory.json` is **schema_version 2**. Dedup metadata changed from
+`dedup_grid`/`dedup_window_px` to `dedup_strategy`/`dedup_strip_rows`, and
+records now carry `geodesic_gsd_cm`. Size 235,707 -> 235,747 B. Anything
+reading the inventory should check `schema_version`.

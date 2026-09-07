@@ -180,7 +180,8 @@ never burn past it.
 | gate | **approved** | owner signed spec, F-7 amendment, `sin` exclusion, E-1 upgrade | — |
 | anchor | **ratified** | primary user = owner scoping a product; licence fork and query vocabulary settled | `CLAUDE.md` pending flag removed |
 | S0 | **GREEN** | **RemoteCLIP-ViT-L-14 (768-d) chosen by measurement.** PM re-ran 12/12 and re-read the vehicle crops independently; both worker concerns put to owner and decided; licence verified Apache 2.0 | — |
-| S1 | **sent back** | returned `BLOCKED` correctly. PM verified (21 green, md5 + denominator re-measured); adversarial reviewer mutated the code 16 ways, **15 caught**, and could not make the classifier read a filename. D-1 amended + D-2 strengthened, both owner-signed | `briefs/S1_fix.md` re-dispatched on a cheaper model after the first attempt died on a spend limit |
+| S1 | **GREEN** | send-back closed. PM verified against the **reviewer's own** fixtures, not the worker's: G1/G2 (99.5% different) now rejected, true contained crop still caught, `leb` multi-date pair intact, geographic path in metres, guard fires at 24.6% on EPSG:3994 and is silent on all 8 scenes, inventory byte-identical across rebuilds. **39 tests green on PM re-run** | — |
+| S1a | **in flight** | brief written (`briefs/S1a.md`) and dispatched | PM verification on handback |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 | S2 | brief written | `briefs/S2.md` drafted; PM verified F-1's arithmetic independently (108,542 / 1,012 / 11,109 all exact) | dispatch after S1a |
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |
