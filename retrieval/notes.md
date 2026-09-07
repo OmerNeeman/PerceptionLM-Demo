@@ -1074,3 +1074,100 @@ Per-scene planned/valid/nodata is emitted at every scale — e.g.
   scenes match exactly. The measured figure is authoritative; `DATA.md`
   reconciled, and its "~4,146" total withdrawn (the column sums to 4,575,
   measured 4,588).
+
+---
+
+## s3-review — 2026-09-07 — retrieval works; three defects closed; N-4 amended
+
+**S3 is GREEN after one send-back.** The demo AOI is indexed: 11,109 planned,
+1,478 skipped as 100% nodata, **9,631 vectors** at 242 tiles/sec in 39.8 s,
+14.8 MB.
+
+### The result that matters
+
+**The PM ran a real text query against the finished index** — before S4 exists —
+because if tile ids were misaligned with vectors, nothing but an end-to-end
+query would reveal it.
+
+- **`a car` at 112 px: 5/5 genuine vehicles** out of 9,631 tiles. Better than
+  S0's 4/5, and on the full AOI rather than 336 calibration crops.
+- **`dirt road` at 448 px:** real roads as linear features — which an 11.2 m
+  crop physically cannot contain. **The owner's per-scale ranking decision is
+  now validated empirically, not just argued.**
+- **`aircraft carrier`: no carriers.** It reaches for large deck-like roofs and
+  the shoreline surf — the nearest things present — topping out at 0.2332
+  against `a car`'s 0.2650. A workable margin for the relative-gap empty state.
+
+Two scares, both resolved and worth recording:
+
+- **`No pretrained weights loaded ... initialized randomly`** prints on every
+  load. If the checkpoint had silently failed, every vector would come from a
+  random network and everything would still look numerically fine — this
+  project's recurring failure mode. **Two independent processes produce
+  byte-identical embeddings**, so the weights are real; `open_clip` builds a
+  random skeleton before RemoteCLIP loads over it. *Suppress or annotate this
+  warning before M1* — it reads like a failure and is not.
+- **The first crops rendered solid black** while the manifest reported zero
+  nodata. The tile id encodes **grid indices, not pixel offsets** (`col 0..22`
+  for a 23x23 grid). The PM's parse was wrong, not the index — but nothing in
+  the manifest states the convention, so **S4 must join to the tile plan for
+  geo rather than interpreting ids itself** (F-10).
+
+### The fp16 question — settled
+
+F-2's `||v|| = 1.0 +/- 1e-5` **cannot** hold for raw fp16 storage. Verified
+independently, twice over: for *random* 768-d unit vectors an fp16 round trip
+puts **43.4%** outside 1e-5; for the real embeddings, **89.8%** (mean 6.38e-5,
+max 2.63e-4). Renormalised on load, max deviation is **1.19e-7**.
+
+**The PM's brief caused this** — it demanded the norm hold *after* the fp16
+round trip, which is stricter than the spec and mathematically impossible.
+F-2 itself is satisfiable and satisfied for every vector the system queries.
+
+The reviewer upheld renormalise-on-load and, valuably, showed it is
+**load-bearing rather than cosmetic**: raw stored norms vary 0.9997-1.0003, so
+an un-renormalised dot product is not a valid cosine *across* tiles. Ranking
+genuinely changed on 1 of 5 real queries in the top-10 and all 5 in the top-50.
+
+### Review findings — 3 fixed, 1 ledgered
+
+The reviewer tried to defeat the mixed-embedder guard (four ways), kill-and-
+resume, tile identity, nodata correctness and cross-process determinism, and
+**could not**. It broke the *safety net* instead:
+
+1. **NaN silently bypassed the sanity check.** `np.abs(nan - 1.0) > ATOL` is
+   `False`, so a NaN vector was never flagged and `load_index` divided by it,
+   returning NaN in every element as a "successfully loaded" unit vector with
+   **no exception**. Not a threshold miss — the comparison's domain was
+   defeated. **Fixed:** non-finite detection now runs before the bound; NaN and
+   Inf both raise, naming rows. PM verified.
+2. **`build_index` reported success without validating resumed state** — a
+   manifest listing 16 tiles against 10 stored vectors returned
+   `{"embedded_total": 16}`. The write-ordering argument does hold (the reviewer
+   could not break it with real kills) but **nothing asserted it at runtime**.
+   **Fixed:** consistency checked on load, raising with both counts.
+3. **The bound was asserted in three places and tested in none** — disabling it
+   (`ATOL = 1e9`) left all 6 tests passing. **Fixed:** gross-norm and
+   noise-tolerance tests, proven by mutation.
+4. **Subtle corruption (~3e-4 to 1e-2) is undetectable** and gets laundered by
+   renormalisation. **Ledgered with owner sign-off** — untightenable by
+   construction, and the index rebuilds in 40 s.
+
+### AMENDMENT — N-4 gains its invariance condition. Owner signed.
+
+Cross-**process** determinism is **exact (0.000e+00)**. But the same tile alone
+vs in a batch of 32 differs by **2.574e-4** — 25x the tolerance — from GPU fp16
+GEMM non-associativity. Not fixable in our code.
+
+Amended to state the condition and require the manifest to record `batch_size`
+(now **256**; the index was rebuilt so the shipped artifact satisfies the
+amended spec rather than merely the old one).
+
+Rejected: widening to 1e-3, which would loosen the bar for the case that passes
+*exactly*; and batch size 1, which buys unconditional truth at ~50x cost and no
+retrieval benefit.
+
+**The sharpest point the reviewer made:** neither shipped test *could* detect
+this, because both hold batch composition constant by construction. The
+criterion was passing for a **structural reason rather than because the property
+held**. That is a category of false green worth watching for elsewhere.

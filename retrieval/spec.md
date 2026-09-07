@@ -288,7 +288,33 @@ re-embedding completed tiles.
 where a shadowed CPU torch makes the build silently run on CPU.
 
 **N-4 — Determinism.** Fixed seeds; same tile bytes produce the same embedding
-to within 1e-5 across runs on the same device.
+to within 1e-5 across runs on the same device, **at a fixed batch size**.
+
+> **AMENDED — owner signed off 2026-09-07** (`notes.md#s3-review`).
+> **Added:** the invariance condition, and a requirement that the manifest
+> record `batch_size`.
+> *Why amended:* determinism across **processes** — fresh interpreter, fresh
+> CUDA context, fresh model load — is **exact (0.000e+00)** when batch
+> composition is held identical. But the same tile embedded **alone** differs
+> from that tile inside a **batch of 32** by up to **2.574e-4**, 25x this
+> tolerance. Cause is GPU fp16 GEMM non-associativity: the kernel is selected by
+> batch shape. It is not a defect in our code and cannot be fixed in it.
+> *Why not simply widen the tolerance to 1e-3:* that would loosen the bar for
+> the case that already passes **exactly**, which is the weakening direction.
+> Stating the condition is strictly more informative than relaxing the number.
+> *Why not force batch size 1:* it would make the criterion hold
+> unconditionally at ~50x the cost — the demo AOI from 40 s to ~35 min, the full
+> pyramid from 6.8 min to ~5.6 h — buying reproducibility across batch sizes and
+> nothing else. Retrieval is unaffected either way: **within one index every
+> vector shares one batch composition**, so the discrepancy can only appear
+> between two differently-batched rebuilds.
+> *Expected, added:* the manifest records `batch_size`; a resume under a
+> different batch size logs a warning naming both; cross-batch deviation is
+> documented as <= 2.6e-4 and is **not** a failure.
+> *Independent confirmation:* measured by the adversarial reviewer, which also
+> established that neither shipped test could detect it — both hold batch
+> composition constant by construction, so the criterion was passing for a
+> structural reason rather than because the property held.
 
 **N-5 — Nothing large is committed.** No weights, tiles, embeddings, imagery
 or COGs in git.
@@ -492,7 +518,7 @@ absent content is the failure mode this exposes.
 | N-1 | measured latency, pasted |
 | N-2 | build log: tiles/sec, wall time, resume |
 | N-3 | `test_dtype_and_cuda` |
-| N-4 | `test_embedding_determinism` |
+| N-4 | `test_embedding_determinism` (fixed batch size); `test_manifest_records_batch_size`; cross-batch deviation measured and reported, not asserted |
 | N-5 | `test_artifacts_gitignored` |
 | N-6 | `test_export_size_fails_loudly` |
 | N-7 | fresh-session cold start |
