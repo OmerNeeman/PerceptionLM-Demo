@@ -17,7 +17,12 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
+import rasterio
+from affine import Affine
+from rasterio.crs import CRS
+from rasterio.windows import Window
 
 import inventory
 
@@ -281,6 +286,146 @@ def test_summary_line_states_counts_per_reason(inv):
     assert line.startswith("8 indexable")
     for token in ("derived_raster", "no_georeference", "resolution_regime_excluded", "duplicate_of"):
         assert token in line
+
+
+# --------------------------------------------------------------------------
+# Fix 1 (S1_fix.md): `_same_pixels` verified only a 4x4 grid of 8x8 windows --
+# 1,024 px/band, 0.000519% of `leb`. A pair constructed to agree only there
+# was declared identical regardless of everything else. The fix must compare
+# the FULL overlap (streamed, early exit), not a larger sample -- so these
+# fixtures build TWO adversarial pairs, one at the historical dedup grid and
+# one at the *entire* primary sampling grid (~25% of the raster, matching the
+# first attempt's good idea in the ADDENDUM: enlarging the sample must not be
+# enough to pass).
+#
+# Both pairs are generated fresh under retrieval/index/ every run (gitignored,
+# deterministic, no dependency on the reviewer's own fixtures on disk).
+# --------------------------------------------------------------------------
+
+ADV_DIR = inventory.INDEX_DIR / "adv_fix1"
+# 1024, matching the reviewer's own G1/G2 fixture: at this size the primary
+# 8x8-of-64x64 sampling grid tiles to ~25% of the raster (262,144 px/band)
+# without covering the whole thing -- at a much smaller size those 8 windows
+# overlap and cover 100%, which would make the pair non-adversarial by
+# construction (there would be no "elsewhere" left to differ).
+ADV_SIZE = 1024
+ADV_XOR = np.uint8(137)  # nonzero -> a ^ ADV_XOR != a for every uint8 a
+
+
+def _write_adv_raster(path: Path, data: np.ndarray, transform: Affine) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=data.shape[2],
+        height=data.shape[1],
+        count=data.shape[0],
+        dtype=data.dtype,
+        crs=CRS.from_epsg(32636),
+        transform=transform,
+    ) as ds:
+        ds.write(data)
+
+
+def _build_adversarial_pair(name: str, match_windows: list, seed: int, size: int = ADV_SIZE):
+    """Two same-footprint, same-CRS, same-transform rasters that agree
+    EXACTLY at every window in `match_windows`, and differ at EVERY other
+    pixel (guaranteed by XOR with a nonzero constant, not by chance-of-
+    random-mismatch)."""
+    rng = np.random.default_rng(seed)
+    transform = Affine(0.10, 0.0, 500000.0, 0.0, -0.10, 3700000.0)
+    base = rng.integers(0, 256, size=(3, size, size), dtype=np.uint8)
+    g1 = base
+    g2 = base ^ ADV_XOR
+    for x, y, w, h in match_windows:
+        g2[:, y : y + h, x : x + w] = g1[:, y : y + h, x : x + w]
+
+    g1_path = ADV_DIR / f"{name}_G1_alpha.tif"
+    g2_path = ADV_DIR / f"{name}_G2_beta.tif"
+    _write_adv_raster(g1_path, g1, transform)
+    _write_adv_raster(g2_path, g2, transform)
+    return g1_path, g2_path, match_windows
+
+
+@pytest.fixture(scope="module")
+def adversarial_dedup_grid_pair():
+    """Agrees on the HISTORICAL dedup grid: 4x4 windows of 8x8 px -- the
+    exact geometry the pre-fix `_same_pixels` sampled, and nothing more. This
+    alone must defeat the code as it stands today."""
+    windows = inventory.sample_windows(ADV_SIZE, ADV_SIZE, inventory.DEDUP_GRID, inventory.DEDUP_WINDOW_PX)
+    return _build_adversarial_pair("dedupgrid", windows, seed=1)
+
+
+@pytest.fixture(scope="module")
+def adversarial_full_sample_grid_pair():
+    """Agrees on the historical dedup grid UNION the entire primary sampling
+    grid (8x8 windows of 64x64 px, ~25% of the raster). The union matters:
+    it must defeat BOTH the code as it stands today (which samples only the
+    dedup grid) AND the lazy fix of merely enlarging the sample to the
+    primary grid (which the ADDENDUM warns is the obvious wrong fix) --
+    only a full-overlap comparison rejects this pair either way."""
+    dedup_windows = inventory.sample_windows(
+        ADV_SIZE, ADV_SIZE, inventory.DEDUP_GRID, inventory.DEDUP_WINDOW_PX
+    )
+    primary_windows = inventory.sample_windows(
+        ADV_SIZE, ADV_SIZE, inventory.SAMPLE_GRID, inventory.SAMPLE_WINDOW_PX
+    )
+    windows = dedup_windows + primary_windows
+    return _build_adversarial_pair("fullsample", windows, seed=2)
+
+
+def _assert_pair_is_adversarial(g1_path: Path, g2_path: Path, windows) -> None:
+    """The fixture self-check (ADDENDUM): read the ACTUAL FILES ON DISK (not
+    the in-memory arrays) and confirm they agree at every one of `windows`
+    and differ at every sampled off-window pixel. If someone later changes
+    DEDUP_GRID/DEDUP_WINDOW_PX or SAMPLE_GRID/SAMPLE_WINDOW_PX, the caller
+    passes the live constants into pair construction, so this keeps checking
+    whatever the *current* sampled geometry actually is."""
+    with rasterio.open(g1_path) as a, rasterio.open(g2_path) as b:
+        for x, y, w, h in windows:
+            pa = a.read(window=Window(x, y, w, h))
+            pb = b.read(window=Window(x, y, w, h))
+            assert np.array_equal(pa, pb), f"fixture not adversarial: window ({x},{y},{w},{h}) differs"
+        # And confirm they are NOT identical overall -- i.e. the windows are
+        # a proper subset of the raster, not the whole thing.
+        full_a = a.read()
+        full_b = b.read()
+        assert not np.array_equal(full_a, full_b), "fixture is trivially identical everywhere"
+        mismatched = int((full_a != full_b).sum())
+        total = full_a.size
+        assert mismatched > 0.5 * total, (
+            f"fixture only differs in {mismatched}/{total} values -- not adversarial enough"
+        )
+
+
+def test_adversarial_dedup_grid_pair_is_genuinely_adversarial(adversarial_dedup_grid_pair):
+    g1, g2, windows = adversarial_dedup_grid_pair
+    _assert_pair_is_adversarial(g1, g2, windows)
+
+
+def test_adversarial_full_sample_grid_pair_is_genuinely_adversarial(adversarial_full_sample_grid_pair):
+    g1, g2, windows = adversarial_full_sample_grid_pair
+    _assert_pair_is_adversarial(g1, g2, windows)
+
+
+def test_same_pixels_rejects_adversarial_agreement(
+    adversarial_dedup_grid_pair, adversarial_full_sample_grid_pair
+):
+    """The regression test for Fix 1. Both pairs are validated (above) to
+    genuinely defeat the OLD sampled comparison -- see S1_fix_result.md for
+    the RED run confirming `_same_pixels` returned True on both before this
+    fix. Now a complete comparison of the overlap must reject both."""
+    g1, g2, _ = adversarial_dedup_grid_pair
+    assert inventory._same_pixels(g2, g1) is False, "dedup-grid-only agreement was accepted as identical"
+    assert inventory._same_pixels(g1, g2) is False
+
+    g1b, g2b, _ = adversarial_full_sample_grid_pair
+    assert inventory._same_pixels(g2b, g1b) is False, (
+        "full-sample-grid-only agreement was accepted as identical -- enlarging "
+        "the sample to the primary grid is not enough, only a full comparison is"
+    )
+    assert inventory._same_pixels(g1b, g2b) is False
 
 
 # --------------------------------------------------------------------------

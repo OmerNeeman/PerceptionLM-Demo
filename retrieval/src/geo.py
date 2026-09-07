@@ -57,6 +57,23 @@ _MERCATOR_PROJ_NAMES = frozenset({"merc", "webmerc"})
 
 CRS_KINDS = ("mercator", "projected", "geographic", "none")
 
+# Fix 3 (S1_fix.md): geodesic_gsd_m is measured independently of the analytic
+# rule (ellipsoidal geodesy via pyproj.Geod, no Mercator/UTM maths at all) and
+# the reviewer found it agrees with the analytic rule to within 0.17% across
+# Web Mercator, three UTM zones and geographic CRSs -- real agreement. Known
+# failure cases (a secant Mercator with lat_ts != 0, e.g. EPSG:3994; an
+# oblique Mercator misclassified as "mercator") diverge by 24-29%. The 1-2%
+# band separates the two cleanly; 1.5% is comfortably above the measured
+# noise floor (~9x) and comfortably below the smallest known failure (~16x).
+GSD_GUARD_TOLERANCE = 0.015
+
+
+class GsdGuardError(ValueError):
+    """The analytic ground-resolution rule disagrees with the independent
+    geodesic cross-check beyond GSD_GUARD_TOLERANCE. Raised, never papered
+    over: a disagreement means an unhandled projection regime, which is a
+    finding for a human, not something to silently substitute away."""
+
 
 def crs_kind(crs) -> str:
     """Classify a CRS into the regime that decides the ground-distance rule.
@@ -193,6 +210,24 @@ def ground_resolution(crs, transform, width: int, height: int) -> GroundResoluti
         gsd_x, gsd_y = gx, gy
     else:
         gsd_x, gsd_y = px_x * factor, px_y * factor
+        # Fix 3 (S1_fix.md): cross-check the analytic rule against the
+        # independent geodesic measurement. geographic is exempt -- there the
+        # geodesic value *is* the rule (gsd_x, gsd_y = gx, gy above), so they
+        # agree trivially. Do not substitute geodesic for the analytic value
+        # on disagreement: fail loudly instead, naming both figures.
+        if geodesic is not None:
+            rule = (gsd_x + gsd_y) / 2.0
+            rel_err = abs(rule - geodesic) / geodesic
+            if rel_err > GSD_GUARD_TOLERANCE:
+                raise GsdGuardError(
+                    f"ground_resolution: analytic rule disagrees with the "
+                    f"geodesic cross-check by {rel_err:.1%} (> "
+                    f"{GSD_GUARD_TOLERANCE:.1%} tolerance) for CRS {crs} "
+                    f"(crs_kind={kind}): rule {rule * 100:.4f} cm vs geodesy "
+                    f"{geodesic * 100:.4f} cm. This means an unhandled "
+                    f"projection regime -- fix the rule, do not widen the "
+                    f"tolerance."
+                )
 
     return GroundResolution(
         crs=str(crs),

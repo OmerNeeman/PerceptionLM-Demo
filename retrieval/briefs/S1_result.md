@@ -262,7 +262,7 @@ source imagery" on `leb`. The rule as written returns four:
 |---|---|---|
 | `leb/2022-10-29.tif` | 3b, 238/245/248 distinct | — **indexed** |
 | `leb/2025-06-06.tif` | 3b, source | — **indexed** |
-| `leb/leb_crop_x4096_y3072_1024.tif` | 3b uint8, EPSG:3857, 236/246/255 distinct | `duplicate_of` `leb/2022-10-29.tif`, kind `contained_crop` |
+| `leb/leb_crop_x4096_y3072_1024.tif` | 3b uint8, EPSG:3857, 236/246/255 distinct (full raster; the artifact's sampled `distinct_per_band` reads 231/242/249) | `duplicate_of` `leb/2022-10-29.tif`, kind `contained_crop` |
 | `leb/tmp_results/cls_leb_legend.png` | 4b PNG, many colours | `no_georeference` |
 
 `leb_crop_…` is **byte-identical** to the 1024x1024 window of

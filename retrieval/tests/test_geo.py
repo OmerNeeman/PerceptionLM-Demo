@@ -20,7 +20,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import numpy as np
 import pytest
+import rasterio
+from affine import Affine
 from rasterio.crs import CRS
 
 import geo
@@ -138,3 +141,116 @@ def test_the_two_regimes_frame_the_same_ground_area_within_5_percent():
     a = geo.ground_resolution_for(LEB_MERCATOR).tile_extent_m(TILE_PX)
     b = geo.ground_resolution_for(UTM_SCENE).tile_extent_m(TILE_PX)
     assert abs(a - b) / max(a, b) < 0.05
+
+
+# --------------------------------------------------------------------------
+# D-2 (geographic) -- Fix 2 (S1_fix.md): of 16 mutations the reviewer tried,
+# exactly one survived all 21 tests: `gsd_x, gsd_y = gx, gy` (metres, correct)
+# replaced by `px_x, px_y` (degrees, reported as if they were metres) at
+# geo.py:193. Nothing ever called ground_resolution on a geographic raster,
+# so a ~111,000x error was invisible. These two real EPSG:4326 rasters close
+# that gap: one is spec E-1's primary ground-truth label raster.
+# --------------------------------------------------------------------------
+
+GEOGRAPHIC_LABEL_RASTER = DATA_ROOT / "tile_cropped_x3308_y3674_z0.125.tif"
+GEOGRAPHIC_SIN_RASTER = DATA_ROOT / "sin" / "sin_min.tiff"
+
+
+def test_ground_resolution_geographic():
+    """A geographic (EPSG:4326) raster's true GSD must come back in METRES,
+    not degrees. Under the surviving mutant (px_x, px_y in degrees returned
+    as if they were the geodesic metres) this fails by a factor of ~111,000:
+    0.00011 cm instead of 12.17 cm."""
+    lbl = geo.ground_resolution_for(GEOGRAPHIC_LABEL_RASTER)
+    assert lbl is not None
+    assert lbl.crs_kind == "geographic"
+    gsd_cm = lbl.true_gsd_m * 100.0
+    assert gsd_cm == pytest.approx(12.17, abs=0.05), f"true GSD is {gsd_cm:.5f} cm/px"
+    # Explicit rejection of the degrees-as-metres regression: that mutant
+    # reports ~0.00011 cm, off by ~5 orders of magnitude.
+    assert gsd_cm > 1.0, "degrees appear to have been returned as metres"
+
+    sin = geo.ground_resolution_for(GEOGRAPHIC_SIN_RASTER)
+    assert sin is not None
+    assert sin.crs_kind == "geographic"
+    sin_gsd_cm = sin.true_gsd_m * 100.0
+    assert sin_gsd_cm == pytest.approx(408.33, abs=0.5), f"true GSD is {sin_gsd_cm:.5f} cm/px"
+    assert sin_gsd_cm > 1.0, "degrees appear to have been returned as metres"
+
+
+# --------------------------------------------------------------------------
+# Fix 3 (S1_fix.md): geodesic_gsd_m is computed for every raster and then
+# discarded, never used as a check. `_scale_correction` applies cos(lat) to
+# any CRS classified "mercator", which is only right when the standard
+# parallel IS the equator (lat_ts == 0). For a secant Mercator (lat_ts != 0,
+# e.g. EPSG:3994 "Mercator 41") the true factor is cos(lat)/cos(lat_ts), so
+# the naive rule silently mis-reports by 24-29%. ground_resolution must
+# cross-check against geodesic_gsd_m and raise (never silently substitute)
+# when they disagree beyond GSD_GUARD_TOLERANCE.
+# --------------------------------------------------------------------------
+
+
+def _make_memory_raster(crs, transform, width=32, height=32):
+    """A tiny synthetic 3-band raster, built entirely in memory -- no write
+    under the read-only data root, nothing left on disk."""
+    data = (np.arange(width * height * 3, dtype="uint16") % 200).reshape(3, height, width)
+    memfile = rasterio.io.MemoryFile()
+    with memfile.open(
+        driver="GTiff",
+        width=width,
+        height=height,
+        count=3,
+        dtype="uint16",
+        crs=crs,
+        transform=transform,
+    ) as ds:
+        ds.write(data)
+    return memfile
+
+
+def test_gsd_guard_fires_on_secant_mercator():
+    """EPSG:3994 (Mercator 41, lat_ts=-41) centred near the equator: the naive
+    cos(lat) rule and the independent geodesic measurement disagree by ~24%,
+    matching the brief's measured `rule 8.7780 cm vs geodesy 11.6232 cm`."""
+    crs = CRS.from_epsg(3994)
+    px = 0.08778  # metres; chosen to land near the brief's "rule 8.7780 cm"
+    w = h = 32
+    # lon_0=100, and y=0 is the equator for a Mercator projection regardless
+    # of lat_ts -- so this places the raster's centre at lat ~= 0.
+    transform = Affine(px, 0.0, -px * w / 2.0, 0.0, -px, px * h / 2.0)
+    memfile = _make_memory_raster(crs, transform, w, h)
+    try:
+        with memfile.open() as ds:
+            with pytest.raises(geo.GsdGuardError) as excinfo:
+                geo.ground_resolution(ds.crs, ds.transform, ds.width, ds.height)
+    finally:
+        memfile.close()
+
+    msg = str(excinfo.value)
+    assert "3994" in msg
+    assert "rule" in msg and "geodesy" in msg
+    # Both figures actually appear, roughly matching the brief's measurement.
+    assert "8.7" in msg or "8.8" in msg
+    assert "11.6" in msg
+
+
+EIGHT_INDEXABLE_SCENES = [
+    DATA_ROOT / "leb" / "2022-10-29.tif",
+    DATA_ROOT / "leb" / "2025-06-06.tif",
+    DATA_ROOT / "AYOSH" / "X693_Y3500.tif",
+    DATA_ROOT / "AYOSH" / "X693_Y3501.tif",
+    DATA_ROOT / "gaza" / "X625_Y3404.tif",
+    DATA_ROOT / "gaza" / "X625_Y3405.tif",
+    DATA_ROOT / "gaza" / "X625_Y3406.tif",
+    DATA_ROOT / "X605_Y3388.tif",
+]
+
+
+def test_gsd_guard_does_not_fire_on_the_eight_indexable_scenes():
+    """The guard must be silent on real data -- all eight scenes docs/DATA.md
+    records as the index. If it fires here, the analytic rule is wrong for
+    real imagery -- a finding for the PM, not a tolerance to widen
+    (S1_fix.md)."""
+    for path in EIGHT_INDEXABLE_SCENES:
+        res = geo.ground_resolution_for(path)  # must not raise
+        assert res is not None, path

@@ -38,7 +38,7 @@ distinct rejection reasons, in the order they are applied:
 
 Sampling
 --------
-A fixed 8x8 grid of 64x64 windows -- 32,768 pixels per band, deterministic,
+A fixed 8x8 grid of 64x64 windows -- 262,144 pixels per band, deterministic,
 no RNG. Rasters here reach 6.44 gigapixels (`sin/Sini_Oct_Det_2025.tif`), so
 nothing is read whole. The strategy and its parameters are written into the
 artifact because D-4 requires two runs to agree.
@@ -103,10 +103,25 @@ TILE_PX = 448
 SAMPLE_GRID = 8
 SAMPLE_WINDOW_PX = 64
 
-# Duplicate content verification: a second, smaller fixed grid.
+# Duplicate content verification (Fix 1, S1_fix.md): containment is a cheap
+# geometric pre-filter only. Content is then verified by a COMPLETE, streamed
+# comparison of the overlapping region, not a sample -- a 4x4 grid of 8x8
+# windows (1,024 px/band, 0.000519% of `leb`) was defeated by a constructed
+# pair that agreed only at the sampled windows and differed everywhere else
+# (`briefs/S1_fix.md` Fix 1). Streamed in row strips so genuinely different
+# scenes (the common case -- they diverge almost immediately) exit early
+# without ever holding a whole raster in memory.
+DEDUP_STRIP_ROWS = 512
+DEDUP_PX_TOLERANCE = 1e-6
+
+# The pre-fix sampled dedup geometry: a 4x4 grid of 8x8 windows. `_same_pixels`
+# no longer samples anything (it compares the full overlap, above), so these
+# are unused in this module now -- kept only so
+# tests/test_inventory.py::test_same_pixels_rejects_adversarial_agreement can
+# reconstruct the exact geometry that used to be exploitable, rather than
+# hardcoding "4" and "8" as magic numbers in the test.
 DEDUP_GRID = 4
 DEDUP_WINDOW_PX = 8
-DEDUP_PX_TOLERANCE = 1e-6
 
 REASONS = frozenset(
     {
@@ -330,15 +345,21 @@ def output_paths() -> list[Path]:
 # --------------------------------------------------------------------------
 
 
-def _bounds(rec) -> tuple[float, float, float, float]:
-    px, py = rec["projected_px_x_m"], rec["projected_px_y_m"]
-    return (0.0, 0.0, rec["width"] * px, rec["height"] * py)
-
-
 def _same_pixels(cand_path: Path, cont_path: Path) -> bool:
-    """Compare a deterministic pixel sample of `cand` against the matching
-    window of `cont`. Two different-date scenes over one footprint (leb 2022
-    vs 2025) have identical bounds, so bounds alone can never decide this."""
+    """True iff `cand`'s full pixel content is identical to the matching
+    region of `cont`. Two different-date scenes over one footprint (leb 2022
+    vs 2025) have identical bounds, so bounds alone can never decide this --
+    footprint containment is a cheap pre-filter, never the content check.
+
+    Fix 1 (S1_fix.md): a fixed-window SAMPLE of the overlap (the historical
+    4x4 grid of 8x8 windows) can be defeated by a raster contrived to agree
+    only at the sampled positions -- verified live against a constructed
+    pair (`tests/test_inventory.py::test_same_pixels_rejects_adversarial_agreement`).
+    So this reads and compares the ENTIRE overlapping region, streamed in
+    row strips with an early exit on the first mismatch: the common case,
+    two genuinely different scenes, diverges almost immediately and never
+    reads past the first strip. Neither raster is ever loaded whole.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", NotGeoreferencedWarning)
         with rasterio.open(cand_path) as a, rasterio.open(cont_path) as b:
@@ -352,9 +373,10 @@ def _same_pixels(cand_path: Path, cont_path: Path) -> bool:
             col, row = int(round(col)), int(round(row))
             if col < 0 or row < 0 or col + a.width > b.width or row + a.height > b.height:
                 return False
-            for x, y, w, h in sample_windows(a.width, a.height, DEDUP_GRID, DEDUP_WINDOW_PX):
-                pa = a.read(window=Window(x, y, w, h))
-                pb = b.read(window=Window(col + x, row + y, w, h))
+            for y in range(0, a.height, DEDUP_STRIP_ROWS):
+                h = min(DEDUP_STRIP_ROWS, a.height - y)
+                pa = a.read(window=Window(0, y, a.width, h))
+                pb = b.read(window=Window(col, row + y, a.width, h))
                 if not np.array_equal(pa, pb):
                     return False
     return True
@@ -489,7 +511,9 @@ def build_inventory(root: Path = DATA_ROOT) -> dict:
             counts[reason] = n
 
     inv = {
-        "schema_version": 1,
+        "schema_version": 2,  # Fix 1 (S1_fix.md): dedup went from a fixed
+        # sample to a full-overlap streamed comparison; sampling.dedup_grid /
+        # dedup_window_px are gone, replaced by dedup_strategy / dedup_strip_rows.
         "stage": "S1",
         "data_root": str(root),
         "proves": ["D-1", "D-2", "D-3", "D-4"],
@@ -508,8 +532,8 @@ def build_inventory(root: Path = DATA_ROOT) -> dict:
             "pixels_per_band": SAMPLE_GRID * SAMPLE_GRID * SAMPLE_WINDOW_PX * SAMPLE_WINDOW_PX,
             "seed": None,
             "note": "no RNG: window origins are round(i*(extent-win)/(grid-1))",
-            "dedup_grid": DEDUP_GRID,
-            "dedup_window_px": DEDUP_WINDOW_PX,
+            "dedup_strategy": "full_overlap_streamed_early_exit",
+            "dedup_strip_rows": DEDUP_STRIP_ROWS,
         },
         "counts": counts,
         "rasters": rasters,
