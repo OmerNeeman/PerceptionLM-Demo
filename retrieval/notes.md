@@ -920,3 +920,73 @@ this is the evidence for why.
 `dedup_grid`/`dedup_window_px` to `dedup_strategy`/`dedup_strip_rows`, and
 records now carry `geodesic_gsd_cm`. Size 235,707 -> 235,747 B. Anything
 reading the inventory should check `schema_version`.
+
+---
+
+## s1a-green — 2026-09-07 — portability landed; the fp16 rule generalised
+
+**S1a is GREEN.** N-8 met, **44 tests green on the PM's own re-run**, and the
+setup half of `INSTRUCTIONS.md` exists.
+
+### The substantive change
+
+`src/embedders.py` had `DTYPE = torch.float16` as a module constant. It is now
+`select_dtype(device, capability=None)` in `src/device.py`:
+
+| device | capability | dtype |
+|---|---|---|
+| CUDA | cc < 8.0 (Turing, Volta) | `float16` |
+| CUDA | cc >= 8.0 (Ampere and later) | `bfloat16` |
+| CPU / MPS | — | `float32` |
+
+PM verified all six branches with **fabricated** capability tuples, so the
+Ampere path is tested without Ampere hardware — and confirmed this machine
+(cc 7.5) still resolves to `float16`, keeping N-3 green.
+
+**This is the important conceptual move in the stage.** `CLAUDE.md` trap 2
+says "fp16, never bf16" and calls model cards recommending bf16 *wrong*. That
+was true and is still true — **for Turing**. It was never a fact about the
+project; it was a fact about the hardware. Stated as a universal it would have
+shipped the *wrong* dtype to the owner's next GPU, where bf16 is native and
+better. The trap is not repealed, it is demoted to a case.
+
+Paths likewise: `AERIAL_DATA_ROOT` (required, **fails loudly with no
+machine-specific fallback**), `AERIAL_INDEX_ROOT` (defaults relative to the
+repo), `AERIAL_MODEL_CACHE_ROOT`, `AERIAL_DEVICE`.
+
+### A latent Windows bug fixed in passing
+
+`str(Path.relative_to(...))` emits **backslash-separated** keys on Windows, so
+an index built there would have had non-portable manifest keys and tile ids
+that silently differ from a Linux-built index. Now routed through
+`posix_key()`. Nobody was looking for this; it fell out of taking N-8
+seriously rather than writing a document about it. **Vindicates doing S1a as a
+stage instead of as prose** — this class of bug is invisible to a
+documentation pass.
+
+### CPU-only is real, and honestly slow
+
+Measured **~5 tiles/sec** on CPU against **265 tiles/sec** on GPU 0 — ~50x.
+Recorded in `INSTRUCTIONS.md` so nobody plans a full index build on CPU by
+accident: the 108,542-tile pyramid would be ~6 hours instead of 6.8 minutes.
+
+### PM found one real defect in INSTRUCTIONS.md
+
+§2 claimed `perception_models`' imports were "all already satisfied by the
+install above". Checked against `open_clip_torch` 3.3.0's **declared
+requirements** rather than against this machine's populated env — it pulls
+`torch`, `torchvision`, `regex`, `ftfy`, `tqdm`, `huggingface-hub`,
+`safetensors`, `timm>=1.0.17` transitively, but **not `einops`**. A fresh
+machine following the document and then taking the optional fallback path
+would have failed on a missing import. Fixed: `einops` named explicitly, and
+the transitive set stated so the claim is checkable rather than asserted.
+
+Also recorded there: `perception_models` pins `timm==1.0.15` while
+`open_clip_torch` needs `timm>=1.0.17`. `--no-deps` is what keeps those from
+fighting — it is not a tidiness measure.
+
+*Method note:* the only way to catch this was to check declared metadata, not
+to run the import on a machine where everything is already present. **A
+portability claim cannot be verified on the machine it was written on.** That
+is why N-9 requires execution on a foreign machine at S9, and this is early
+evidence the requirement is right.

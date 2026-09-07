@@ -23,7 +23,9 @@ mode "r"; no call in this module passes any other mode.
 
 Environment (CLAUDE.md): every invocation must be prefixed inline --
 
-    env PYTHONNOUSERSITE=1 /home/omer/anaconda3/envs/geo/bin/python ...
+    env PYTHONNOUSERSITE=1 <python> ...
+
+(see INSTRUCTIONS.md for the interpreter path on this dev machine)
 """
 
 from __future__ import annotations

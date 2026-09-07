@@ -4,8 +4,10 @@ Cuts one subregion from the tent-camp scene, tiles it at 448 / 224 / 112 px
 with 0% overlap, embeds every crop with each candidate, ranks a fixed query
 set by cosine, and writes the top-5 crops as PNGs for visual judgement.
 
-    env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 \
-        /home/omer/anaconda3/envs/geo/bin/python retrieval/src/calibrate.py
+    env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 <python> retrieval/src/calibrate.py
+
+(see INSTRUCTIONS.md for the interpreter path and AERIAL_DATA_ROOT on this
+dev machine)
 
 Reads the source raster read-only. Writes only under retrieval/index/calib/.
 """
@@ -24,14 +26,17 @@ from PIL import Image, ImageDraw
 from rasterio.windows import Window
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import config  # noqa: E402
 from embedders import CANDIDATES, load_embedder  # noqa: E402
 
 log = logging.getLogger("calibrate")
 
 # --- the calibration subregion -------------------------------------------
 # READ-ONLY source (docs/DATA.md): coastal Khan Yunis / al-Mawasi tent camp,
-# EPSG:32636, true GSD 10.00 cm/px, 3-band uint8 RGB.
-SRC = Path("/home/omer/PycharmProjects/Dynamic-Terrain/data/X605_Y3388.tif")
+# EPSG:32636, true GSD 10.00 cm/px, 3-band uint8 RGB. Filename only -- the
+# folder it lives in comes from config.py (AERIAL_DATA_ROOT), never a
+# hardcoded machine path (N-8).
+SRC = config.get_data_root() / "X605_Y3388.tif"
 
 # Chosen by eye from a thumbnail (see _scene_thumb.png / _cand_D.png).
 # Contains: tents and tarpaulins (white, blue, yellow, orange), date palms,

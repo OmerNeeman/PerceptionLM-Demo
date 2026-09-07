@@ -181,9 +181,10 @@ never burn past it.
 | anchor | **ratified** | primary user = owner scoping a product; licence fork and query vocabulary settled | `CLAUDE.md` pending flag removed |
 | S0 | **GREEN** | **RemoteCLIP-ViT-L-14 (768-d) chosen by measurement.** PM re-ran 12/12 and re-read the vehicle crops independently; both worker concerns put to owner and decided; licence verified Apache 2.0 | — |
 | S1 | **GREEN** | send-back closed. PM verified against the **reviewer's own** fixtures, not the worker's: G1/G2 (99.5% different) now rejected, true contained crop still caught, `leb` multi-date pair intact, geographic path in metres, guard fires at 24.6% on EPSG:3994 and is silent on all 8 scenes, inventory byte-identical across rebuilds. **39 tests green on PM re-run** | — |
-| S1a | **in flight** | brief written (`briefs/S1a.md`) and dispatched | PM verification on handback |
+| S1a | **GREEN** | N-8 met. PM re-verified the dtype rule at 6 fabricated cases (cc 7.5 -> fp16, cc 8.0/8.6/9.0 -> bf16, cpu/mps -> fp32); `src/` greps clean; config fails loudly naming the env var; `posix_key` canonicalises Windows separators. **44 tests green on PM re-run.** `INSTRUCTIONS.md` setup half written, one real defect found and fixed by PM (`einops` gap) | — |
+| S2 | **in flight** | brief + addendum written; dispatched | PM verification on handback |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
-| S2 | brief written | `briefs/S2.md` drafted; PM verified F-1's arithmetic independently (108,542 / 1,012 / 11,109 all exact) | dispatch after S1a |
+
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |
 
 **Owner decisions taken at the S0 gate** (both were unspecified points the

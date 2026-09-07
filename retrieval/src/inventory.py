@@ -49,9 +49,8 @@ Every `rasterio.open` in this module and in `geo.py` uses the default mode
 "r". Nothing is ever written under the data root; every output path resolves
 inside `retrieval/index/`.
 
-Run:
-    env PYTHONNOUSERSITE=1 /home/omer/anaconda3/envs/geo/bin/python \\
-        retrieval/src/inventory.py
+Run (see INSTRUCTIONS.md for the interpreter path and AERIAL_DATA_ROOT):
+    env PYTHONNOUSERSITE=1 <python> retrieval/src/inventory.py
 """
 
 from __future__ import annotations
@@ -67,19 +66,23 @@ import rasterio
 from rasterio.errors import NotGeoreferencedWarning, RasterioIOError
 from rasterio.windows import Window
 
+import config
 import geo
 
 log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------
 # Paths. The data root is READ-ONLY; every output goes under retrieval/index/.
+# Both come from config.py (spec N-8): the data root has no machine-specific
+# default and fails loudly if AERIAL_DATA_ROOT is unset; the index root
+# defaults to <repo>/retrieval/index, which needs no configuration at all.
 # --------------------------------------------------------------------------
 
-DATA_ROOT = Path("/home/omer/PycharmProjects/Dynamic-Terrain/data")
+DATA_ROOT = config.get_data_root()
 
-SRC_DIR = Path(__file__).resolve().parent
-RETRIEVAL_DIR = SRC_DIR.parent
-INDEX_DIR = RETRIEVAL_DIR / "index"
+SRC_DIR = config.SRC_DIR
+RETRIEVAL_DIR = config.RETRIEVAL_DIR
+INDEX_DIR = config.get_index_root()
 INVENTORY_JSON = INDEX_DIR / "inventory.json"
 
 # --------------------------------------------------------------------------
@@ -463,7 +466,9 @@ def build_inventory(root: Path = DATA_ROOT) -> dict:
     unreadable: list[dict] = []
 
     for p in sorted(q for q in root.rglob("*") if q.is_file()):
-        rel = str(p.relative_to(root))
+        # posix_key, not str(): identical on this Linux box, but keeps the
+        # manifest key '/'-separated if this ever runs on Windows (N-8).
+        rel = config.posix_key(p.relative_to(root))
         rec = probe_raster(p)
         if not rec["opened"]:
             if _UNSUPPORTED_FORMAT in (rec["error"] or ""):

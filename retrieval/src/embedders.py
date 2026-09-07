@@ -12,11 +12,14 @@ entered the contrastive objective (see notes.md#research-1).
 
 Environment, non-negotiable (CLAUDE.md traps 1 and 2):
 
-    env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 \
-        /home/omer/anaconda3/envs/geo/bin/python ...
+    env PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 <python> ...
 
-fp16 always, bf16 never: these are Turing cards (cc 7.5) where bf16 is
-emulated at 7.0 TFLOP/s against 38.9 for fp16.
+(see INSTRUCTIONS.md for the interpreter path on this dev machine)
+
+dtype is device-dependent, not hardcoded (spec N-8): see `device.py`. On this
+project's Turing cards (cc 7.5) that resolves to fp16, never bf16 -- bf16 is
+emulated there at 7.0 TFLOP/s against 38.9 for fp16 -- but the rule reaches
+the opposite conclusion on Ampere and later.
 """
 
 from __future__ import annotations
@@ -29,10 +32,10 @@ import numpy as np
 import torch
 from PIL import Image
 
-log = logging.getLogger(__name__)
+import config
+from device import resolve_device, select_dtype
 
-# fp16, never bf16 -- CLAUDE.md trap 2.
-DTYPE = torch.float16
+log = logging.getLogger(__name__)
 
 # Fixed seeds and deterministic kernels (spec N-4, F-3).
 SEED = 0
@@ -129,7 +132,7 @@ class Embedder:
         for i in range(0, len(images), batch_size):
             chunk = images[i : i + batch_size]
             batch = torch.stack([self._preprocess(im) for im in chunk])
-            batch = batch.to(self.device, dtype=DTYPE, non_blocking=False)
+            batch = batch.to(self.device, dtype=self.dtype, non_blocking=False)
             feats = self.model.encode_image(batch)
             out.append(self._normalise(feats))
         return np.concatenate(out, axis=0)
@@ -174,7 +177,7 @@ def _resolve_revision(spec: CandidateSpec) -> str:
         return "unknown"
 
 
-def _load_pe(spec: CandidateSpec, device: torch.device) -> Embedder:
+def _load_pe(spec: CandidateSpec, device: torch.device, dtype: torch.dtype) -> Embedder:
     import core.vision_encoder.pe as pe
     from core.vision_encoder.config import PE_TEXT_CONFIG
     from core.vision_encoder.transforms import (
@@ -183,7 +186,7 @@ def _load_pe(spec: CandidateSpec, device: torch.device) -> Embedder:
     )
 
     model = pe.CLIP.from_config(spec.id, pretrained=True)
-    model = model.to(device=device, dtype=DTYPE).eval()
+    model = model.to(device=device, dtype=dtype).eval()
 
     preprocess = get_image_transform(model.image_size)
     ctx = PE_TEXT_CONFIG[spec.id].context_length
@@ -198,7 +201,7 @@ def _load_pe(spec: CandidateSpec, device: torch.device) -> Embedder:
     )
 
 
-def _load_open_clip(spec: CandidateSpec, device: torch.device) -> Embedder:
+def _load_open_clip(spec: CandidateSpec, device: torch.device, dtype: torch.dtype) -> Embedder:
     import open_clip
     from huggingface_hub import hf_hub_download
 
@@ -208,7 +211,10 @@ def _load_open_clip(spec: CandidateSpec, device: torch.device) -> Embedder:
     model, _, preprocess = open_clip.create_model_and_transforms(
         spec.open_clip_arch, pretrained=None
     )
-    ckpt_path = hf_hub_download(spec.hf_repo, spec.hf_file)
+    cache_dir = config.get_model_cache_root()
+    ckpt_path = hf_hub_download(
+        spec.hf_repo, spec.hf_file, cache_dir=str(cache_dir) if cache_dir else None
+    )
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
@@ -226,7 +232,7 @@ def _load_open_clip(spec: CandidateSpec, device: torch.device) -> Embedder:
             f"{spec.id}: {len(real_missing)} parameters not in checkpoint, "
             f"first few: {real_missing[:5]}"
         )
-    model = model.to(device=device, dtype=DTYPE).eval()
+    model = model.to(device=device, dtype=dtype).eval()
 
     tokenizer = open_clip.get_tokenizer(spec.open_clip_arch)
     return Embedder(
@@ -239,25 +245,45 @@ def _load_open_clip(spec: CandidateSpec, device: torch.device) -> Embedder:
     )
 
 
-def load_embedder(candidate_id: str) -> Embedder:
-    """Load one candidate onto GPU 0 in fp16."""
+def load_embedder(candidate_id: str, device: str | torch.device | None = None) -> Embedder:
+    """Load one candidate.
+
+    `device` (or AERIAL_DEVICE, see config.py) forces the compute device --
+    pass e.g. "cpu" to deliberately run without a GPU (N-8). Left as None
+    (the default, and unchanged from pre-N-8 behaviour), this requires CUDA
+    to be visible: `torch.cuda.is_available() is False` here is CLAUDE.md
+    trap 1 (a shadowed CPU-only torch), not "no GPU present", so it fails
+    loudly rather than silently degrading -- degrading is only correct when
+    a caller explicitly asked for it.
+
+    dtype is never hardcoded: it is `device.select_dtype(device)` (N-8), so
+    it tracks whatever device this call resolves to.
+    """
     if candidate_id not in CANDIDATES:
         raise KeyError(
             f"unknown candidate {candidate_id!r}; "
             f"known: {sorted(CANDIDATES)}"
         )
     spec = CANDIDATES[candidate_id]
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "torch.cuda.is_available() is False. This is CLAUDE.md trap 1: a "
-            "CPU-only torch in ~/.local shadows the CUDA build. Re-run with "
-            "PYTHONNOUSERSITE=1."
-        )
+
+    forced = device if device is not None else config.get_forced_device()
+    if forced is None:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "torch.cuda.is_available() is False. This is CLAUDE.md trap 1: a "
+                "CPU-only torch in ~/.local shadows the CUDA build. Re-run with "
+                "PYTHONNOUSERSITE=1. To deliberately run without a GPU, pass "
+                "device='cpu' to load_embedder(...) or set AERIAL_DEVICE=cpu."
+            )
+        resolved_device = torch.device("cuda")
+    else:
+        resolved_device = resolve_device(forced)
+
+    dtype = select_dtype(resolved_device)
     _seed_everything()
-    device = torch.device("cuda")
-    log.info("loading %s (%s) in %s", spec.id, spec.loader, DTYPE)
+    log.info("loading %s (%s) on %s in %s", spec.id, spec.loader, resolved_device, dtype)
     if spec.loader == "pe":
-        return _load_pe(spec, device)
+        return _load_pe(spec, resolved_device, dtype)
     if spec.loader == "open_clip":
-        return _load_open_clip(spec, device)
+        return _load_open_clip(spec, resolved_device, dtype)
     raise RuntimeError(f"no loader {spec.loader!r}")
