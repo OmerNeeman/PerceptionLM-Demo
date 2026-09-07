@@ -426,3 +426,299 @@ right that multi-vector late interaction is SOTA for micro-detail; the
 reservations are that it needs the decoder, costs 102x, and its only
 off-the-shelf form was tuned on 127,460 *document* query-page pairs, so aerial
 transfer is unmeasured.
+
+---
+
+## owner-ratify-2 — 2026-09-07 — problem anchor closed, three decisions taken
+
+Asked at the start of implementation, answered by the owner.
+
+**1. Primary user: the owner, scoping a product.** The demo exists to inform a
+build/don't-build decision. Success is *enough signal to judge feasibility*,
+not time-saved for a third-party analyst.
+*Impact — this is load-bearing and it simplifies things.* The
+"RATIFICATION PENDING" block in `CLAUDE.md` is **removed**; the problem
+statement is now stated fact. It also retires the three anchor questions
+`notes.md#intake` left open (workaround cost, why-now, accuracy bar): there is
+no external workaround to cost, and the accuracy bar is *whatever is enough to
+decide*, which is exactly why the owner set a qualitative gate. It further
+confirms **U-5 is the most important UX requirement in the spec** — a demo
+whose purpose is a go/no-go decision must not overstate what the imagery
+supports, or it corrupts the decision it exists to serve.
+
+**2. Licence fork: take the measured winner, document the licence.** If the
+best embedder on this imagery carries a restrictive licence, use it and record
+the caveat rather than shipping worse retrieval. Rationale accepted: the index
+is rebuildable from source imagery, so the choice costs one re-embed to
+reverse — unlike PLM, whose licence problem was structural.
+*Impact:* F-0 is decided on retrieval quality; licence is a recorded property
+of the manifest, not a veto. **Open:** RemoteCLIP's exact licence terms are not
+yet verified (no LICENSE file ships in the HF snapshot) — see open item below.
+
+**3. Demo query vocabulary: all four categories.** Small objects (tents, cars),
+structures (buildings, flat roofs), terrain (dirt road, sand, palm trees), and
+damage (rubble, debris, collapsed roof).
+*Impact:* the owner will query at **all three scales**, which materially
+raises the stakes on the cross-scale ranking decision below — a single pooled
+ranking dominated by 112 px would break the terrain queries specifically.
+Damage queries are **not answerable on `X605_Y3388`** (a tent camp); they are
+what `leb`'s 2022->2025 pair and `gaza` contain. So M2's fan-out is worth more
+than `plan.md` currently ranks it, and the deferred change-aware retrieval
+gains value. Not pulled into M1 — the milestone stays a running demo — but
+recorded so S6 is not treated as optional breadth.
+
+---
+
+## s0-bakeoff — 2026-09-07 — RemoteCLIP chosen by measurement; PM-verified
+
+**Stage S0 gated GREEN.** Worker status was `DONE_WITH_CONCERNS`; both
+concerns that touch the spec were put to the owner and decided (below), so the
+stage advances rather than being accepted as a soft pass.
+
+### The decision
+
+**Embedder: `RemoteCLIP-ViT-L-14`, 768-d**, `chendelong/RemoteCLIP` pinned at
+revision `bf1d8a3ccf2ddbf7c875705e46373bfe542bce38`, loaded via `open_clip`.
+
+*Why:* it wins the one query that was actually in doubt, and it is the only
+candidate whose known-absent control is beaten by all 8 real queries.
+
+| | control max | weakest real max | margin | spread | margin/spread | real > control |
+|---|---|---|---|---|---|---|
+| PE-Core-G14-448 | +0.1489 | +0.1508 | +0.0019 | 0.0498 | 0.04 | 8/8 |
+| PE-Core-L14-336 | +0.2002 | +0.1845 | **-0.0157** | 0.0640 | **-0.25** | **7/8** |
+| RemoteCLIP-ViT-L-14 | +0.2236 | +0.2371 | **+0.0135** | 0.0415 | **+0.33** | 8/8 |
+
+Vehicle retrieval at 112 px, by eye: RemoteCLIP **4/5**, PE-Core-L14 3/5,
+PE-Core-G14 2/5. Throughput: RemoteCLIP **265 tiles/sec** (6.8 min for the
+108,542-tile pyramid) vs L14 84.5 (21 min) vs G14 11.6 (**2h36m**). Its 768-d
+vectors are also the smallest, which is direct headroom against F-8.
+
+*Impact:* **F-2 dimensionality becomes 768**, not 1280. `open_clip_torch`
+becomes a load-bearing runtime dependency, not a bake-off convenience. PE Core
+is retained as a documented fallback — the loader interface in
+`src/embedders.py` covers all three candidates, so reverting is a config
+change plus a re-embed.
+
+### Both owner questions from the handoff, answered
+
+**Does RemoteCLIP beat PE Core on this imagery? Yes — modestly, consistently,
+and decisively on vehicles.** On easy queries (`tents`, `palm trees`) all three
+score ~5/5 and aerial pretraining buys nothing visible; the gain is
+concentrated exactly where the domain gap should show. RemoteCLIP also handled
+`tent` vs `tents` most sensibly, by selecting the appropriate **scale** (112 px
+for one tent, 224 px for a group) rather than by returning different crops at
+one scale. This settles the question the killed RS-CLIP survey was owed —
+empirically, on our own imagery, for ten minutes of compute.
+
+**Do 112 px crops surface vehicles? Yes — and 448 px surfaces none at all**
+(0/5, 0/5, 0/5 across all three candidates). 112 px took top-1 for `car` in
+every candidate; per-scale top-1 scores rise monotonically as the crop shrinks;
+224 px also works (3/5). **The multi-scale pyramid is vindicated**: without the
+112 px level this system would not find a vehicle at all. That is the strongest
+single result in S0 and it validates `notes.md#arch-confirm`'s core claim — a
+16x gain in signal fraction, obtained from the only text-aligned representation
+available.
+
+### PM verification — not taken on trust
+
+- Re-ran the suite independently: **12 passed in 72.83s**, all three candidates.
+- **Read the vehicle crops myself.** `RemoteCLIP` top-5 at 112 px: #1 dark car
+  on a track plus a light car, #2 white sedan and a dark car, #3 vehicles among
+  palms, #4 silver car and a white vehicle, #5 tarps and sand — a miss. **4/5,
+  confirming the worker's read.** `PE-Core-L14`: #1, #2, #5 hits; #3 and #4
+  palms and tarps. **3/5, also confirmed.**
+- Cross-checked the control claim two independent ways: the table says
+  PE-Core-L14's control max is +0.2002, and its top `car` crop is labelled
+  +0.1845 in the contact sheet I read. **The known-absent query really does
+  outscore the real one.**
+- Data tree untouched (`find -newermt`, empty). Nothing large tracked (92 KB
+  total; `.gitignore:5` covers `retrieval/index/`).
+- RED-then-GREEN present and genuine: two independent REDs for N-3 (naive
+  draft loading fp32, then trap 1 reproduced live by dropping
+  `PYTHONNOUSERSITE`), plus a **third real bug the F-3 test caught on its own**
+  — PE's `load_ckpt` prints to stdout and contaminated a cross-process probe
+  channel. Not born-green.
+
+### Two interface decisions — flagged by the worker, taken by the owner
+
+**1. Ranking is per scale, not pooled.** *Owner decision.* The finding:
+112 px took top-1 for **9/9** queries on both PE candidates, so it dominates
+any single pooled ranking — including queries where it is the wrong scale to
+look at. An 11.2 m crop physically cannot contain a road as a linear object,
+which is exactly why `dirt road` and `sand` converge there.
+
+Results are returned as **three rankings, one per scale, each labelled by true
+ground extent (11 m / 22 m / 47 m)**. Chosen over score normalisation because
+the fusion weights would be a tuning knob with no ground truth to tune against
+(`Car` has zero labels), and over a scale selector because U-6 already has
+filters to keep legible. It is also self-documenting: every query the owner
+types re-answers "does the 112 px level earn its place".
+
+*Why a clarification and not an amendment:* `spec.md` F-4 specifies cosine,
+sorted descending, bounded, exact — and says nothing about how scales combine.
+This was **unspecified, not weakened**; per methodology §8, unspecified is a
+blocker, and the worker correctly stopped rather than inventing a fusion rule.
+No criterion was loosened. F-4 and U-2 gain the per-scale requirement.
+
+**2. The empty state uses a relative gap, not an absolute threshold.**
+*Owner decision.* No fixed cosine cut-off is usable: PE-Core-L14's
+`aircraft carrier` scored **+0.2002 against its own best `car` at +0.1845**,
+G14's margin is +0.0019, and even RemoteCLIP's +0.0135 sits against a 0.0415
+spread. Absolute cosine magnitude carries no cross-query meaning.
+
+U-3 is therefore satisfied by a **per-query relative gap** — a weak match is
+one whose top score fails to stand out from the corpus mean by a stated
+multiple of spread. **No spec amendment: U-3 never required an absolute
+threshold**, only that the empty state exist and guide. E-2's known-negative
+query supplies the calibration data, and the multiple must be stated in the
+UI, not buried.
+
+### Four findings accepted as measured limits, not defects
+
+These are the resolution reality that `spec.md` D-5 and U-5 already anticipate.
+Logged so later stages and the eval report expect them:
+
+- **Beige corrugated metal is retrieved by `sand`** — RemoteCLIP put a large
+  hall roof at ranks 2 and 4 of `sand` at 224 px. At ~35-45 cm effective
+  resolution these surfaces share colour and texture statistics. Expect this
+  class of confusion in E-1; it is a resolution limit.
+- **Attribute queries do not discriminate.** `a white car` ~ `car` (3/5 shared
+  crops on every candidate), and "flat roof" did not exclude a pitched tile
+  roof. The colour word made RemoteCLIP measurably **worse** (2/5 vs 4/5).
+  Exactly the `docs/DATA.md` prediction. **Do not offer attribute search, and
+  do not use attribute phrasings in the demo's example queries.**
+- **`tent`/`tents` verdicts are base-rate inflated** — nearly every crop in the
+  calibration subregion contains a tent, so ~5/5 measures the scene, not the
+  model. Anything quantitative needs the labelled raster, which covers `leb`,
+  not this scene.
+- **The vehicle result rests on visual reads**, because `Car` has zero pixels in
+  the eval raster. Mitigated by the PM independently reading the same crops and
+  agreeing; it cannot be mitigated further, and E-1a already says so.
+
+### Deviations, all accepted
+
+1. **Calibration subregion 1792x1792, not ~2048x2048.** 1792 = 4x448 = 8x224 =
+   16x112, so all three scales tile the **identical extent** with zero
+   remainder. At 2048 the 448 grid would have covered 76.6% of the area the
+   112 grid saw, confounding the per-scale comparison that was the whole point.
+   **Better than the brief.** The brief was wrong; the worker was right.
+2. **`perception_models` installed with `--no-deps`.** Its `requirements.txt`
+   pins `numpy==2.1.2`, `pillow==11.0.0`, `timm==1.0.15`,
+   `scikit-learn==1.6.1`, `opencv-python==4.11.0.86` and pulls `torchdata`,
+   `torchcodec`, `lm-eval`, `wandb`. Running the brief's command as written
+   would have downgraded five packages `CLAUDE.md` records as verified and
+   risked replacing `torch 2.6.0+cu118` — i.e. **the brief as written would
+   have broken the environment it was written to protect.** The worker audited
+   the actual imports (numpy, torch, torchvision, einops, timm,
+   huggingface_hub, ftfy, regex — all present), installed with `--no-deps`, and
+   verified the env intact afterwards. **`--no-deps` is now mandatory in
+   `CLAUDE.md`.** Best catch of the stage.
+3. **Contact sheets in addition to the 135 individual crop PNGs** — 3
+   candidates x 9 queries x 5 crops does not fit usefully in one context. The
+   sheets (row = scale, labelled with cosine and pixel offset) are why
+   per-scale verdicts exist at all, and they are what made the PM's independent
+   re-read cheap. Adopt this pattern for later visual-judgement stages.
+
+### New environment trap, discovered
+
+**PE's `load_ckpt` prints to stdout**, so a subprocess that returns data on
+stdout gets a contaminated channel. Recorded as trap 4 in `CLAUDE.md`. Only
+bites stages that shell out to a PE process — which, now that RemoteCLIP is
+chosen, is a narrower risk than it was.
+
+### Dependencies added — recorded for N-4 / §14
+
+`pytest` 9.1.1 · `open_clip_torch` 3.3.0 (**load-bearing** — loads the chosen
+embedder) · `accelerate` 1.14.0 (installed, **not needed**; no candidate
+required sharded loading — kept, harmless) · `perception_models` 1.0.0 @ commit
+`3e352cca660658d4b5c90f42a7808b11469e4c66`, cloned to `/home/omer/perception_models`,
+**outside** the repo, installed `--no-deps`.
+
+### Licence — resolved the same day
+
+**RemoteCLIP is Apache 2.0**, verified at `github.com/ChenDelong1999/RemoteCLIP`.
+
+The HF repo `chendelong/RemoteCLIP` has **no model card and no LICENSE file** —
+only the `.pt` blob — so the terms come from the upstream source repo, and the
+manifest records that provenance rather than implying the weights shipped with
+a licence of their own.
+
+*So the owner's licence fork never had to be paid.* The measured winner carries
+the **same Apache 2.0 as PE Core**, and unlike PerceptionLM (FAIR
+non-commercial) it does not disqualify a future product. The debt was
+discharged the day it was opened.
+
+*Residual, carried as debt rather than closed:* RemoteCLIP's training corpora
+(RET-3 / SEG-4 / DET-10, aggregated from third-party remote-sensing datasets)
+do not state their own terms. That is a **dataset-lineage** question for a
+commercial launch, not a weights-licence question, and it is legal work rather
+than engineering — so it must not stall the demo whose whole purpose is to
+inform whether a launch happens at all.
+
+---
+
+## owner-portability — 2026-09-07 — portability becomes a spec requirement, not a doc task
+
+**Owner asked for three things:** (1) to explore and sample the system
+themselves once the PM has verified it works, (2) everything committed and
+pushed, (3) an `INSTRUCTIONS.md` a fresh session can follow to set up and run
+the system **on any computer — Linux or Windows, with a different GPU**.
+
+### (3) is a design change, and it arrived at the right time
+
+The PM audited what S0 and S1 actually produced:
+
+| Location | Hardcoded |
+|---|---|
+| `src/embedders.py:35` | `float16` |
+| `src/inventory.py:78` | `/home/omer/PycharmProjects/Dynamic-Terrain/data` |
+| `src/calibrate.py:34` | the demo scene's absolute path |
+| several docstrings | `/home/omer/anaconda3/envs/geo/bin/python` |
+
+**No document can fix that.** And the fp16 case is worse than a mere path
+problem: `CLAUDE.md` trap 2 says "fp16, never bf16" and calls model cards
+recommending bf16 *wrong for this machine* — which is true, and true **only**
+for this machine. These are Turing cards (cc 7.5) where bf16 is emulated at
+7.0 TFLOP/s against 38.9 for fp16. On **Ampere or later, bf16 is native and
+the better choice**. So a correct portable implementation must reach the
+*opposite* conclusion on the owner's next GPU, and a CPU-only machine needs
+fp32 because fp16 on CPU is unsupported or pathologically slow.
+
+*Impact:* two new requirements — **N-8** (portable across OS, GPU generation
+and CPU-only; nothing machine-specific in `src/`; dtype selected by device
+capability as an asserted pure function) and **N-9** (`INSTRUCTIONS.md`,
+verified **by execution on a foreign machine**, not by review — anything the
+fresh session had to ask counts as a defect in the document).
+
+*Trap 2 is not repealed, it is generalised.* fp16 remains correct here, as a
+**case** of the capability rule rather than as the rule. Any worker that reads
+`CLAUDE.md` and hardcodes fp16 is still doing the right thing on this
+hardware and the wrong thing in the repository.
+
+### New stage S1a, before S2 — and why not at S9
+
+Portability lands as **S1a: config + device abstraction**, sequenced *after*
+S1 and *before* S2. It is the only stage permitted to edit S0's and S1's
+files.
+
+The reason it is not deferred to S9 (the existing cold-start stage) is
+arithmetic: S2, S3, S4 and S5 would each copy the hardcoded pattern, so
+retrofitting five modules costs strictly more than fixing two. Deferring a
+cross-cutting property until the end is how it stops being achievable.
+
+Cheap to do now, so it is done now. The index itself is not the constraint —
+re-embedding one AOI is ~42 s at 265 tiles/sec — the *code pattern* is.
+
+### (1) and (2)
+
+**(1) Hand-over point is M1, after S5.** That is the first moment anything is
+explorable: one AOI indexed at three scales, queryable, exported as a
+standalone HTML. The PM verifies it works first — re-running the tests and
+using the export as a confused user — then hands it over. `INSTRUCTIONS.md` is
+written when there are real, tested commands to document; written earlier it
+would be fiction.
+
+**(2) Commit and push authorised by the owner**, 2026-09-07. Branch-per-stage
+still holds; `main` stays protected and is reached by merge, not by direct
+commit.

@@ -70,6 +70,23 @@ this domain. All are off-the-shelf and require no training.
 Changing embedder later invalidates the entire index, so this decision is made
 first and recorded in the manifest.
 
+> **SETTLED at S0, 2026-09-07 — `notes.md#s0-bakeoff`, evidence in
+> `briefs/S0_result.md`.** Chosen: **RemoteCLIP-ViT-L-14, 768-d**
+> (`chendelong/RemoteCLIP` @ `bf1d8a3ccf2ddbf7c875705e46373bfe542bce38`).
+> It is the only candidate whose known-absent control is beaten by all 8 real
+> queries (+0.0135 margin; PE-Core-L14 scored **-0.0157** — its
+> `aircraft carrier` outranked its own `car`). 4/5 genuine vehicle crops at
+> 112 px vs 3/5 and 2/5; 265 tiles/sec vs 84.5 and 11.6.
+> **This is F-0's output, not an amendment** — F-0 exists to be decided by
+> measurement, and it was. PM re-ran the suite (12/12) and re-read the crops
+> independently.
+>
+> **Also settled by S0, and load-bearing for every later stage:** 448 px
+> surfaces **zero** vehicles for **every** candidate (0/5, 0/5, 0/5), while
+> 112 px takes top-1 for `car` in all three. Without the finest pyramid level
+> this system cannot find a vehicle at all. `SCALES` is not a tuning
+> preference; it is the reason retrieval works.
+
 **F-1a — One embedder serves every scale.**
 Different models occupy different embedding spaces, so a query vector cannot be
 compared across them.
@@ -78,12 +95,20 @@ build that would mix embedders fails loudly rather than producing a mixed
 index. Every tile is resized to the model's native input, so a 112 px crop and
 a 448 px crop cost the same forward pass.
 
-**F-2 — Tile embeddings are unit-normalised vectors from PE Core.**
-One pooled vector per tile per scale — the attention-pool output, which is the
-only PE-Core representation actually aligned to the text tower. Patch tokens
-are **not** used; see `notes.md#research-1` for why.
+**F-2 — Tile embeddings are unit-normalised, text-aligned pooled vectors.**
+One pooled vector per tile per scale — **the model's own text-aligned image
+embedding**, whatever produces it: the projected CLS token for RemoteCLIP /
+OpenCLIP ViT-L-14, the attention-pool output for PE Core. Take it from the
+model's public `encode_image` path; do not reach inside for an intermediate.
+**Patch tokens are never used at any scale** — see `notes.md#research-1` and
+`notes.md#arch-confirm`. The reason survives the embedder change: patch tokens
+of a CLIP-family tower never entered the contrastive objective, so they are not
+text-comparable, and the published attempt scored 2.5 nDCG@5 against 51.4 for
+simply pooling. Small objects are handled by the `SCALES` pyramid instead — S0
+measured that this works (112 px takes top-1 for `car`; 448 px finds none).
 *Expected:* `||v||_2 = 1.0 +/- 1e-5` for every tile; dimensionality equals the
-model's (1280 for PE-Core-G14-448, 1024 for L14-336); the stored index records
+model's — **768 for the chosen RemoteCLIP-ViT-L-14** (1280 for
+PE-Core-G14-448, 1024 for L14-336 if ever reverted to); the stored index records
 model id, revision, and the scale each vector came from.
 
 **F-2a — Export embeddings are PCA-reduced and quantised.**
@@ -103,6 +128,27 @@ Since vectors are unit-normalised, cosine = dot product.
 *Expected:* top-`TOP_K` results are sorted by score descending; scores lie in
 [-1, 1]; a query embedding compared against itself scores 1.0 +/- 1e-5.
 Results are exact (brute force), not approximate.
+
+> **CLARIFIED — owner signed off 2026-09-07** (`notes.md#s0-bakeoff`).
+> **Ranking is per scale: one ranking per entry in `SCALES`, never a single
+> pooled ranking across scales.** Each is labelled with its true ground extent
+> (11 m / 22 m / 47 m).
+> *Why:* S0 measured that 112 px takes top-1 for **9/9** queries on both PE
+> candidates, so a pooled ranking is dominated by the finest scale even where
+> that scale is the wrong one to look at — an 11.2 m crop physically cannot
+> contain a road as a linear object, which is why `dirt road` and `sand`
+> converge there.
+> Rejected alternatives: within-scale score normalisation (the fusion weights
+> would be a tuning knob with **no ground truth to tune against** — `Car` has
+> zero labels), and a scale selector (U-6 already has filters to keep legible).
+> *This is a clarification, not an amendment:* F-4 specified cosine, sorted,
+> bounded and exact, and said **nothing** about how scales combine. The point
+> was **unspecified, not weakened** — no criterion was loosened, and per
+> methodology §8 the worker correctly stopped rather than inventing a fusion
+> rule. `TOP_K` now means top-`TOP_K` *per scale*.
+> *Expected, added:* a query returns exactly `len(SCALES)` rankings, each
+> sorted descending and each tagged with its scale and true ground extent; no
+> result appears in a ranking for a scale it was not embedded at.
 
 **F-5 — The index persists and reloads without recomputation.**
 *Expected:* build once, reload in a fresh process, and the same query returns
@@ -185,6 +231,51 @@ truncate results.
 builds the index without asking a question. Verified by an actual fresh
 session, not by inspection.
 
+**N-8 — Portable across OS, GPU generation, and CPU-only.** *(added
+2026-09-07 at owner request — see `notes.md#owner-portability`.)*
+Nothing machine-specific may be embedded in `src/`. The system runs on Linux
+and Windows, on any CUDA GPU generation, and with no GPU at all.
+*Expected, each separately checkable:*
+- **No absolute machine-specific path anywhere in `src/`.** A test greps the
+  package for `/home/`, `C:\\`, `anaconda3` and the data-root literal and
+  fails on any hit. The data root, index root and model cache come from
+  **config with environment-variable override**, and the config carries no
+  default that only exists on one machine.
+- **dtype is selected by device capability, never hardcoded.** A pure function
+  maps device -> dtype and is asserted directly: CUDA compute capability
+  **< 8.0 -> `float16`** (Turing/Volta: bf16 is emulated and 5.6x slower);
+  **>= 8.0 -> `bfloat16` permitted** (Ampere and later have native bf16);
+  **CPU or MPS -> `float32`** (fp16 on CPU is unsupported or pathologically
+  slow). The current machine is cc 7.5, so it must still resolve to
+  `float16` — the existing behaviour is a *case* of the rule, not the rule.
+- **Runs with no GPU.** Forcing device `cpu` completes an index build and a
+  query, at documented reduced throughput. Asserted by an actual CPU-forced
+  run over a small tile set, not by inspection.
+- **Path handling is OS-agnostic.** `pathlib` throughout; no string
+  concatenation of separators, no POSIX-only assumptions. Tile ids and manifest
+  keys use a single canonical separator so an index built on one OS loads on
+  the other. A test asserts a manifest written with Windows-style inputs reads
+  back identically.
+- **No interpreter path in code.** A specific interpreter may appear in
+  documentation as an example; it may not appear in importable code.
+
+**N-9 — `INSTRUCTIONS.md` cold-starts a foreign machine.** *(added
+2026-09-07 at owner request.)*
+A single top-level document that a person or a fresh agent can follow on a
+machine that is **not** this one, to install, build an index, query it, and
+produce the export.
+*Expected:* it states prerequisites and how to check them; covers **Linux and
+Windows** side by side; covers **CUDA, and CPU-only**; names the dtype rule and
+why it differs per GPU generation; explains where imagery is expected and how
+to point the system at a different location; gives copy-pasteable commands per
+platform; lists expected wall times with the hardware they assume; and has a
+troubleshooting section for the failure modes actually encountered (shadowed
+CPU torch, bf16 on pre-Ampere, `pyproj` PROJ database, GDAL/rasterio install,
+the Mercator GSD correction). **Verified by execution, not by review** — a
+fresh session follows it with no prior context and no access to this
+conversation, and reports where it got stuck. Anything it had to ask is a
+defect in the document.
+
 ---
 
 ## 4. UX requirements
@@ -194,10 +285,27 @@ rest; no blank box requiring the user to guess vocabulary.
 
 **U-2 — Results are a scored, located grid.** Each hit shows its thumbnail,
 similarity score, date, and lat/lon. Score formatting is fixed-width so a
-column of scores is scannable.
+column of scores is scannable. **Results are grouped into one row per scale,
+each row labelled with its true ground extent** (per F-4's clarification) — so
+the user can see which scale found a hit, and scores are only ever compared
+within a row.
 
 **U-3 — Empty state guides.** A query with no hits above threshold explains
 that and suggests a broader term. Never a blank grid, never a stack trace.
+
+> **CLARIFIED — owner signed off 2026-09-07** (`notes.md#s0-bakeoff`).
+> **The threshold is a per-query relative gap, never an absolute cosine
+> cut-off.** A weak match is one whose top score fails to stand out from that
+> query's corpus mean by a stated multiple of the score spread; the multiple
+> must be **visible in the UI**, not buried in code.
+> *Why:* S0 measured that absolute cosine magnitude carries no cross-query
+> meaning. PE-Core-L14's known-absent `aircraft carrier` scored **+0.2002,
+> above its own best `car` at +0.1845**; PE-Core-G14's control margin is
+> +0.0019; even the chosen RemoteCLIP's +0.0135 sits against a 0.0415 spread.
+> Any fixed cut-off would either suppress real hits or pass pure noise.
+> *This is a clarification, not an amendment:* U-3 required only that the empty
+> state **exist and guide**, never that the threshold be absolute. Nothing was
+> weakened. E-2's known-negative query supplies the calibration data.
 
 **U-4 — Feedback on anything over 300 ms**, specifically the first query
 (model/index warm-up) and any Q&A call.
@@ -289,6 +397,11 @@ absent content is the failure mode this exposes.
 
 | Req | Proof |
 |---|---|
+| F-0 | **SATISFIED at S0** — `briefs/S0_result.md`: candidate x query table, throughput, stated choice; PM re-ran 12/12 and re-read crops |
+| F-1a | `test_one_embedder_per_index` — manifest carries exactly one model id + revision; a build that would mix embedders raises |
+| F-2a | `test_pca_export_roundtrip` — basis stored and re-projectable; retrieval@10 overlap full-precision vs exported, **reported per scale** |
+| E-1a | by-eye vehicle verdict on saved top-10 crops (no labels exist; non-gating) |
+| F-11 | *optional (S8)* — same E-1 table for ColQwen2.5 side by side |
 | D-1 | `test_source_classifier` — exactly 2 of 31 leb rasters, by value inspection |
 | D-2 | `test_gsd_correction` — 10.47 cm/px, 46.91 m tile; rejects 12.5/56.0 |
 | D-3 | `test_data_dir_readonly` — output paths + tree checksum unchanged |
@@ -297,7 +410,7 @@ absent content is the failure mode this exposes.
 | F-1 | `test_tiling_covers_extent` — zero gaps, count 1012 |
 | F-2 | `test_embed_unit_norm` — norms, dim, recorded model id |
 | F-3 | `test_text_embed_deterministic` |
-| F-4 | `test_cosine_ranking` — sorted, bounded, self-similarity 1.0 |
+| F-4 | `test_cosine_ranking` — sorted, bounded, self-similarity 1.0; `test_ranking_is_per_scale` — one ranking per scale, no cross-scale pooling |
 | F-5 | `test_index_roundtrip` — byte-identical results after reload |
 | F-6 | `test_aoi_filter` — single-tile bbox, empty bbox |
 | F-7 | `test_date_filter` — leb pool halves |
@@ -311,13 +424,23 @@ absent content is the failure mode this exposes.
 | N-5 | `test_artifacts_gitignored` |
 | N-6 | `test_export_size_fails_loudly` |
 | N-7 | fresh-session cold start |
-| U-1..U-8 | adversarial UX review against the rendered export |
+| N-8 | `test_no_machine_paths` (grep of `src/`), `test_dtype_for_device` (cc<8 -> fp16, cc>=8 -> bf16, cpu -> fp32), `test_cpu_only_build`, `test_manifest_path_portable` |
+| N-9 | fresh session executes `INSTRUCTIONS.md` on a foreign machine and reports blockers; anything it asked = defect |
+| U-1..U-8 | adversarial UX review against the rendered export; U-3 additionally `test_weak_match_is_relative` — a known-negative query is flagged weak, and no absolute cosine constant appears in the threshold path |
 | E-1, E-2 | eval report, non-gating |
 
 **Value -> dependents** (re-verify these when the value changes):
 `TILE_PX` -> F-1 tile counts, D-2 ground extent, F-8 export size, E-1
 thresholds. `EMB_DTYPE` -> F-8 size, F-2/F-4 numeric tolerances.
 Embedder choice -> F-2 dimensionality, F-8 size, all of section 5.
+
+**Embedder changed at S0 (1280 -> 768). Dependents re-verified:** F-2
+dimensionality updated to 768. F-8 export size — *unaffected*: the export is
+PCA-reduced to `EXPORT_DIM`=128 before int8, so source dim never enters the
+budget, and headroom improves. Section 5 — structurally unaffected, but every
+number in it must be computed with RemoteCLIP, and S0's measured confusions
+(beige corrugated metal retrieved by `sand`; no attribute discrimination) are
+expected to appear there. F-4 numeric tolerances unchanged.
 
 ---
 
