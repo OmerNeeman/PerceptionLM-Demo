@@ -158,6 +158,14 @@ PE Core (Apache 2.0) is not.
 
 ## Standards
 
+- **Producing a RED for D-3 must never target the real data root.** To prove
+  a "we never write outside `index/`" guard fails when sabotaged, point the
+  sabotage at a **scratch stand-in** (`tmp_path`) configured as the data root —
+  never at
+  `/home/omer/PycharmProjects/Dynamic-Terrain/data`. This rule exists because a
+  stage did exactly that once (incident, `notes.md#s2-green`): the RED-then-GREEN
+  requirement and the read-only rule pull in opposite directions for D-3
+  specifically, and the brief must resolve it rather than leaving a worker to.
 - **The data directory is READ-ONLY.**
   `/home/omer/PycharmProjects/Dynamic-Terrain/data` belongs to another
   project. Never write, move, or convert in place. Derived artifacts

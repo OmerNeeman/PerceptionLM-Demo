@@ -990,3 +990,87 @@ to run the import on a machine where everything is already present. **A
 portability claim cannot be verified on the machine it was written on.** That
 is why N-9 requires execution on a foreign machine at S9, and this is early
 evidence the requirement is right.
+
+---
+
+## s2-green — 2026-09-07 — tiling and COGs; one incident, one stale artifact
+
+**S2 is GREEN.** 79 tests pass on the PM's own re-run.
+
+### INCIDENT — a test wrote under the read-only data root
+
+**What happened.** While producing a RED for D-3, an early sabotage test
+**created a directory directly under
+`/home/omer/PycharmProjects/Dynamic-Terrain/data`**. The worker caught it,
+deleted it, rewrote the test against a scratch `tmp_path`, and **disclosed it
+unprompted** in the handback.
+
+**PM forensic verification — not taken on the worker's word:**
+
+| Check | Result |
+|---|---|
+| `tree_digest()` recomputed vs the value recorded before S2 ran | **identical** — `sha256:7cacf2fe…` |
+| Anything in the tree modified today | **only the root directory's own mtime** (21:39). Every subdirectory still dated March-August |
+| Empty or stray directories | none |
+| `.aux.xml` sidecars | 26, **all dated April-August** — none created by us |
+| Lock/tmp/backup files | none |
+
+**Impact: none.** No file was written, modified, moved or lost. The only
+residue is the root inode's mtime, which a create+delete cannot avoid and which
+cannot be reverted without a further write — so it stays, documented.
+
+**Root cause is the brief, not just the worker.** For D-3 specifically, the
+RED-then-GREEN requirement and the read-only rule **pull in opposite
+directions**: the natural way to prove "we never write outside `index/`" fails
+when sabotaged is to attempt a write outside `index/`. My brief demanded the
+RED and did not say where to aim it. The worker independently reached the right
+fix; the brief should have specified it.
+
+*Standing rule added to `CLAUDE.md`:* a D-3 RED must target a **scratch
+stand-in configured as the data root**, never the real one.
+
+**Not a send-back.** The deliverable is correct, impact is nil, and it was
+disclosed rather than concealed. Punishing voluntary disclosure of a
+remediated, zero-impact error is how a project teaches concealment — which
+would cost far more than this did.
+
+### The handback was true and the artifact was still wrong
+
+The handback reported all F-1 counts matching. The **tests** did assert
+5,198 / 20,704 / 82,640 and pass. But the **emitted plans on disk carried only
+scale 448** — 5,198 tiles total, and the demo AOI at 529 instead of 11,109.
+S3 consumes those files, not the tests.
+
+Cause was benign: stale output from an earlier partial run, never regenerated.
+`SCALES = (448, 224, 112)` and `plan_all()` were correct all along. PM
+regenerated via the module's own entry point; it took **~1 second** (pure
+metadata, as designed) and produced exactly 108,542 / 11,109 / 1,012.
+
+*Lesson, now standard practice:* **verify the emitted artifact, not only the
+test that computed it.** A green suite says the code is right; it does not say
+the file on disk was produced by that code. This is the second time in this
+project that checking the artifact rather than the report changed the verdict.
+
+### Results
+
+COG conversion verified independently: metadata preserved, **six random 448²
+windows byte-identical**, block layout `(1, 20179)` strips -> `(256, 256)`
+tiles, **7 overview levels** added. Read amplification 45.04x -> 1.31-2.94x,
+which is the entire justification for the stage and is now measured rather than
+asserted.
+
+Per-scene planned/valid/nodata is emitted at every scale — e.g.
+`X605_Y3388` 529/410/14.2% at 448, 8464/7091/14.2% at 112.
+
+### Two findings accepted
+
+- **UTM lon/lat tile bboxes are not bit-exact at shared edges** (~0.26 m worst
+  case) — meridian convergence, not a coverage gap; the worker proved coverage
+  separately in projected space, which is the correct place to prove it.
+  Mercator tiles are bit-exact. Consequence for F-6: an AOI bbox filter on UTM
+  scenes must not assume bit-exact edge adjacency.
+- **`X605_Y3388` valid count is 410, not `docs/DATA.md`'s 397** — measured
+  under a *stated* >50%-nodata rule against recon's unstated one. Seven of eight
+  scenes match exactly. The measured figure is authoritative; `DATA.md`
+  reconciled, and its "~4,146" total withdrawn (the column sums to 4,575,
+  measured 4,588).

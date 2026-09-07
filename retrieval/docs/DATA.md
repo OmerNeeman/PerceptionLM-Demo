@@ -24,6 +24,21 @@ It belongs to another project. Never write, move or convert in place.
 
 \* reduced by nodata: `X693_Y3501` is 25.1% zero-fill, `X605_Y3388` is 14.2%.
 
+> **RECONCILED 2026-09-07 by S2**, which measured valid counts under a stated,
+> explicit rule (a tile is invalid when > 50% nodata) rather than the unstated
+> one recon used. Seven of the eight scenes match this column exactly.
+> **`X605_Y3388` measures 410, not 397.** The measured figure is now
+> authoritative; 397 came from an unrecorded threshold and cannot be reproduced.
+>
+> The column sums to **4,575** (measured: **4,588**), not the "~4,146" this file
+> previously stated — that total was simply wrong and is withdrawn.
+>
+> **Do not confuse this column with F-1's counts.** This is *floor* (complete
+> tiles only) *and* nodata-reduced. F-1's **108,542** is the padded planned grid
+> (`ceil`, nodata ignored) and is the number the tile planner asserts. Both are
+> legitimate; they answer different questions. Measured per-scale valid counts
+> for all 8 scenes at all 3 scales are in `index/tileplan/`.
+
 **Total ~4,146 valid tiles at 448 px.** With the `[448, 224, 112]` pyramid:
 5,198 + 20,704 + 82,640 = **108,542** tiles.
 

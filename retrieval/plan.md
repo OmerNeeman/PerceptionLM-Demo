@@ -182,7 +182,8 @@ never burn past it.
 | S0 | **GREEN** | **RemoteCLIP-ViT-L-14 (768-d) chosen by measurement.** PM re-ran 12/12 and re-read the vehicle crops independently; both worker concerns put to owner and decided; licence verified Apache 2.0 | — |
 | S1 | **GREEN** | send-back closed. PM verified against the **reviewer's own** fixtures, not the worker's: G1/G2 (99.5% different) now rejected, true contained crop still caught, `leb` multi-date pair intact, geographic path in metres, guard fires at 24.6% on EPSG:3994 and is silent on all 8 scenes, inventory byte-identical across rebuilds. **39 tests green on PM re-run** | — |
 | S1a | **GREEN** | N-8 met. PM re-verified the dtype rule at 6 fabricated cases (cc 7.5 -> fp16, cc 8.0/8.6/9.0 -> bf16, cpu/mps -> fp32); `src/` greps clean; config fails loudly naming the env var; `posix_key` canonicalises Windows separators. **44 tests green on PM re-run.** `INSTRUCTIONS.md` setup half written, one real defect found and fixed by PM (`einops` gap) | — |
-| S2 | **in flight** | brief + addendum written; dispatched | PM verification on handback |
+| S2 | **GREEN** | counts verified from the **regenerated artifacts** (108,542 / 11,109 / 1,012), COGs byte-identical over 6 random windows with 45x -> ~1.3-2.9x amplification, **79 tests green**. One disclosed incident (a test wrote under the data root) forensically verified as zero-impact; standing rule added to `CLAUDE.md` | — |
+| S3 | **in flight** | brief written; dispatched. **Mandatory adversarial review** per `CLAUDE.md` | PM verification + reviewer |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |
