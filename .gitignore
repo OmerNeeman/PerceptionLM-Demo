@@ -2,3 +2,5 @@ output/
 __pycache__/
 *.pyc
 .claudine/
+retrieval/index/
+retrieval/**/__pycache__/
