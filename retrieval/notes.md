@@ -311,3 +311,58 @@ on. Revisit only if the pyramid underperforms.
 2. **GRAFT precedent worth noting**: in this exact domain, getting text-aligned
    patch features required training a new encoder against co-located
    ground-level photos. https://arxiv.org/abs/2312.06960
+
+---
+
+## e1-scoped — 2026-09-07 — E-1 measured and cut back; PM over-sold it
+
+The PM described the 45-class label raster as a free retrieval eval set. On
+measurement it is far weaker than advertised, and the spec has been corrected
+rather than left optimistic.
+
+Measured (`tile_cropped_x3308_y3674_z0.125.tif`, 8192x8192, EPSG:4326):
+
+- Covers **993 x 500 m = 0.497 km2 = 23% of the `leb` footprint** only.
+  210 tiles at 448 px.
+- **49.8% `Unclassified`** -> ~0.25 km2 of usable label.
+- **`Car`: zero pixels.** The single most important small-object query class
+  has no ground truth at all. 33 of 45 classes present, `Car` absent.
+- Top three real classes are `Batha` 13.9%, `DryGrassland` 12.8%,
+  `Garigue` 6.5% — Mediterranean succession stages, near-zero CLIP signal.
+- **33 of 45 classes are lithology/pedology** (Limestone/Dolomite/Nari/Basalt/
+  Chalk/Maral variants, Rendzina, TerraRosa, ClayeySoil…). Not visual
+  categories; the distinction is field geology. Including them would produce a
+  misleadingly bad headline number while hiding that the system works on
+  House/DirtRoad/Pavement.
+- **EPSG:4326 vs the imagery's EPSG:3857** — needs warping onto the image grid
+  before scoring. Now explicitly part of the stage.
+
+**Owner asked whether 10 classes would be better than 45.** Answer: the
+10-class list (`cls_leb_legend.txt`: road, sidewalk, building, rut, rock, wall,
+fence, tree/hedge, grass+soil+sand, car) **has no ground-truth raster** — it is
+a segmentation model's *output* legend, not labels. So it is not an
+alternative source, only an alternative vocabulary.
+
+**Decision:** keep the 45-class raster as the label source; evaluate the
+**eight** classes that are both CLIP-nameable and supported (DirtRoad, Shadow,
+Pavement, House, DirtRoadB, Maquis, UnirrigatedOrchard, PavedRoad), each
+reported with its tile support; exclude the geology/pedology classes with a
+stated reason; judge **vehicles by eye** (E-1a), optionally with the
+segmentation output as clearly-labelled pseudo-ground-truth.
+
+*Impact:* E-1 stays non-gating and becomes honest. It can tell us whether
+scene-level and building-level retrieval works. It **cannot** tell us whether
+vehicle retrieval works — that remains a by-eye judgement, which is what the
+owner's qualitative gate was going to be anyway.
+
+## owner-answers — 2026-09-07 — late interaction confirmed as ColQwen2.5
+
+- **Start with the naive single-vector method** (owner: "A5 - ok let's start
+  with this"). Tile, embed pooled, L2-normalise, cosine, top-k. The multi-scale
+  pyramid exists only because a car is 0.37% of a 448 px tile.
+- **ColQwen2.5 is the chosen late-interaction implementation** when F-11 is
+  reached — off-the-shelf, no training by us, ungated (Qwen2-VL, Apache 2.0)
+  unlike ColPali's gated PaliGemma. Still local-only: ~256 KB/tile cannot be
+  exported.
+- **Dense-CLIP surgery stays out of the loop** (owner: "keep it outside the
+  loop for now"). Recorded as future work only.

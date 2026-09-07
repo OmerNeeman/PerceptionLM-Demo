@@ -225,16 +225,58 @@ The owner set the acceptance gate as qualitative (judged by eye,
 `notes.md#intake`). These numbers are produced as **information** for the
 product-scoping decision and do not block a stage.
 
-**E-1 — recall@k against segmentation ground truth.** *(upgraded, owner
-approved)* Using `tile_cropped_x3308_y3674_z0.125.tif` — the **45-class** label
-raster over the `leb` AOI, 31 classes present — query each directly-visual
-class name (`Car`, `House`, `PavedRoad`, `DirtRoad`, `Pavement`, `Water`,
-`GreenGrassland`, `BrickWall`, …) and report recall@1/5/10 and precision@5. A
-tile counts as a true hit if that class covers >= a stated minimum fraction of
-the tile; state the fraction. Supersedes the 10-class legend.
-*Expected:* one table row per evaluated class, with the threshold and the
-per-class tile support stated. **No pass/fail** — the acceptance gate is
-qualitative by owner choice.
+**E-1 — recall@k against segmentation labels, honestly scoped.**
+Source: `tile_cropped_x3308_y3674_z0.125.tif`, the 45-class label raster over
+part of the `leb` AOI. **Measured limits, established before writing this —
+do not re-derive:**
+
+- It covers **993 x 500 m = 0.497 km2, only 23% of the `leb` footprint**
+  (210 tiles at 448 px, 882 at 224, 3528 at 112).
+- **49.8% of it is `Unclassified`**, leaving ~0.25 km2 of usable label.
+- **`Car` has zero pixels.** 33 of 45 classes are present; `Car` is not one.
+- It is **EPSG:4326** while `leb` imagery is EPSG:3857 — it must be warped onto
+  the image grid before scoring. That warp is part of this stage.
+- The three best-supported classes (`Batha` 13.9%, `DryGrassland` 12.8%,
+  `Garigue` 6.5%) are Mediterranean shrubland succession stages — specialist
+  ecology terms a web-trained text tower has almost no signal on. Report them
+  if you like, but do not treat a low score there as a system failure.
+- 33 of the 45 classes are lithology or pedology (`LimestoneRockyTerrain` vs
+  `DolomiteRockyTerrain` vs `NariRockyTerrain`, `Rendzina`, `TerraRosa`,
+  `ClayeySoil`, …). These are **not visual categories** — the distinction is
+  made by field geology, not appearance. **Excluded from evaluation**, and the
+  report must say why rather than showing them as failures.
+
+**Evaluate these eight** — CLIP-nameable and actually supported. Report
+recall@1/5/10 and precision@5 for each, **with its tile support beside it**:
+
+| class | % of labelled area |
+|---|---|
+| `DirtRoad` | 1.74 |
+| `Shadow` | 1.03 |
+| `Pavement` | 0.53 |
+| `House` | 0.52 |
+| `DirtRoadB` | 0.35 |
+| `Maquis` | 0.34 |
+| `UnirrigatedOrchard` | 0.12 |
+| `PavedRoad` | 0.11 |
+
+A tile counts as a true hit if the class covers >= a stated minimum fraction of
+it; state the fraction. Query with a natural phrasing, not the raw class token
+("a dirt road", not `DirtRoadB`), and record the phrasing used.
+
+**E-1a — vehicles have no ground truth.** `Car` is the most important query
+class and the hardest, and the label raster contains none. Two options, in
+order of preference:
+1. Judge vehicle retrieval **by eye** — save the top-10 crops for "a white
+   car" / "cars" / "vehicles" and read them back. Consistent with the owner's
+   qualitative gate.
+2. Optionally use the `leb` segmentation **output** rasters (which carry a car
+   class) as **pseudo-labels**. Weaker evidence — they are model predictions,
+   not truth — and any number derived from them must be labelled as such.
+
+*Expected:* one table of the eight classes with support and phrasing, a
+separate by-eye verdict on vehicles, and an explicit list of what was excluded
+and why. **No pass/fail** — the gate is qualitative by owner choice.
 
 **E-2 — Known-negative behaviour.** Query a term with no referent in the
 imagery (e.g. "aircraft carrier"). Report the top-5 scores.
