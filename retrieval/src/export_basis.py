@@ -4,12 +4,20 @@ brief S4, spec F-2a.
 The local index (`embed_index.py`) keeps full precision (768-d float16 on
 disk, renormalised to unit norm on load). This module builds the *separate*
 export artifact S5 will ship: every indexed vector projected down to
-`EXPORT_DIM` (128) by PCA fit on the AOI's own corpus, then quantised to
-int8. The basis (components + the int8 scale) is stored alongside the
-quantised vectors so a **query** vector can be projected identically at
-query time -- `project_query` below is the one function both the export
-build and any later query path must call, so "identically" is not a promise
-kept by two independent implementations.
+`EXPORT_DIM` by PCA fit on the AOI's own corpus, then quantised to int8. The
+basis (components + the int8 scale) is stored alongside the quantised
+vectors so a **query** vector can be projected identically at query time --
+`project_query` below is the one function both the export build and any
+later query path must call, so "identically" is not a promise kept by two
+independent implementations.
+
+**`EXPORT_DIM` raised from 128 to 384 -- S4_fix Fix 3, owner decision from
+the PM's measured dim-vs-accuracy curve (retrieval@10 overlap, int8, 8
+queries, this index):** 128d -> 0.713 mean overlap (1.23 MB), 256d -> 0.800
+(2.47 MB), **384d -> 0.833 (3.70 MB, chosen)**, 384d fp16 -> 0.871 (7.40 MB),
+768d fp16 -> 1.000 (lossless -- the local index is already fp16, see below).
+`measure_overlap`'s own module-level report/tests reproduce this module's
+share of that curve at 384d.
 
 **Deliberately NOT mean-centered -- measured, not a stylistic choice.** The
 textbook PCA (subtract the corpus mean, eigendecompose the *covariance*
@@ -83,8 +91,10 @@ import embedders
 
 log = logging.getLogger(__name__)
 
-#: Config symbol (spec.md's "EXPORT_DIM (PCA target, default 128)").
-EXPORT_DIM = 128
+#: Config symbol (spec.md's "EXPORT_DIM (PCA target, default 128)" -- raised
+#: to 384 by S4_fix Fix 3, an owner decision from the measured
+#: dim-vs-accuracy curve in this module's docstring; still int8).
+EXPORT_DIM = 384
 
 #: int8 covers [-127, 127] symmetrically (not -128) so quantise/dequantise
 #: round-trips through a single scale factor with no off-by-one at either end.

@@ -201,7 +201,12 @@ def test_tile_id_depends_on_full_identity_tuple():
 # --------------------------------------------------------------------------
 
 
-def test_tile_plan_output_paths_resolve_inside_index(tmp_path):
+def test_tile_plan_output_paths_resolve_inside_index(tmp_path, monkeypatch):
+    """D-3's guard is exercised against a scratch stand-in index root
+    (`tmp_path`, via `AERIAL_INDEX_ROOT`), never the real one -- S4_fix Fix 1:
+    this test used to write straight into the real `index/tileplan/`, and was
+    one of three writes in this file that clobbered the shipped artifact."""
+    monkeypatch.setenv(config.ENV_INDEX_ROOT, str(tmp_path))
     out_dir = config.get_index_root() / "tileplan"
     plans = {"leb/2022-10-29.tif": {448: tiling.plan_scene("leb/2022-10-29.tif", 448)}}
     written = tiling.write_tile_plans(plans, out_dir=out_dir)
@@ -236,13 +241,31 @@ def test_data_dir_digest_check_would_actually_catch_a_change(monkeypatch):
         assert before == after, "the read-only data tree changed during a plan + COG build"
 
 
-def test_data_dir_unchanged_across_a_full_plan_and_cog_build():
+def test_data_dir_unchanged_across_a_full_plan_and_cog_build(tmp_path, monkeypatch):
     """D-3: recursive mtime/checksum of the data tree is unchanged across a
-    full index build -- here, a full tile plan (all 8 scenes x 3 scales,
-    written to disk) plus the leb COG build."""
+    full index build -- here, a full tile plan (all 8 scenes x 3 scales) plus
+    the leb COG build. Redirected to `tmp_path` via `AERIAL_INDEX_ROOT`, not
+    the real index root (S4_fix Fix 1): this used to call
+    `write_tile_plans`/`convert_leb` with no `out_dir`/`index_root`, which
+    default to the real `index/`, and was one of three writes in this file
+    that clobbered the shipped tileplan artifact -- this test's own subject
+    (D-3, read-only *data*) never required writing into the real *index*
+    root. `cog.build_cog`'s own D-3 write-guard checks `config.get_index_root()`
+    directly (not whatever `index_root` a caller passes in), so redirecting
+    via the env var -- not just via a passed-in path -- is what actually
+    keeps both `write_tile_plans` and `convert_leb`'s internal guard happy
+    against the same scratch root. `inventory.py`'s own `INDEX_DIR` is a
+    module-level constant frozen at import time (not re-read from the env
+    var), so `plan_all` is pointed at the real, already-written
+    `inventory.json` explicitly (read-only lookup -- it exists, so
+    `load_indexable_scenes` never tries to write it) rather than letting it
+    default to a nonexistent file under the scratch root, which would hit
+    that frozen guard."""
+    real_inventory_path = config.get_index_root() / "inventory.json"
+    monkeypatch.setenv(config.ENV_INDEX_ROOT, str(tmp_path))
     before = inventory.tree_digest()
 
-    plans = tiling.plan_all()
+    plans = tiling.plan_all(inventory_path=real_inventory_path)
     tiling.write_tile_plans(plans)
     cog.convert_leb()
 
@@ -250,8 +273,22 @@ def test_data_dir_unchanged_across_a_full_plan_and_cog_build():
     assert before == after, "the read-only data tree changed during a plan + COG build"
 
 
-def test_tile_plan_files_are_valid_json_and_round_trip():
-    plans = tiling.plan_all(scales=(448,))
+def test_tile_plan_files_are_valid_json_and_round_trip(tmp_path, monkeypatch):
+    """Redirected to `tmp_path` via `AERIAL_INDEX_ROOT`, not the real index
+    root -- S4_fix Fix 1: this was THE destructive write. `scales=(448,)`
+    written straight over `config.get_index_root() / "tileplan"` truncated
+    the real, shipped three-scale artifact to 448-only every time the suite
+    ran; the PM had regenerated the full plan once and this test silently
+    destroyed it again. Nothing about what this test actually checks (JSON
+    round-trips, counts match) requires touching the real index root at all.
+    `inventory_path` is pointed at the real, already-written `inventory.json`
+    explicitly (read-only lookup) for the same reason as the test above:
+    `inventory.py`'s `INDEX_DIR` is frozen at import time, so a nonexistent
+    inventory path under the scratch root would hit that guard trying to
+    write one."""
+    real_inventory_path = config.get_index_root() / "inventory.json"
+    monkeypatch.setenv(config.ENV_INDEX_ROOT, str(tmp_path))
+    plans = tiling.plan_all(scales=(448,), inventory_path=real_inventory_path)
     written = tiling.write_tile_plans(plans, out_dir=config.get_index_root() / "tileplan")
     total_from_disk = 0
     for p in written:
@@ -259,3 +296,24 @@ def test_tile_plan_files_are_valid_json_and_round_trip():
         for scale_key, plan in doc.items():
             total_from_disk += plan["planned_count"]
     assert total_from_disk == EXPECTED_PER_SCALE_TOTAL[448]
+
+
+def test_shipped_tileplan_still_has_all_three_scales_after_suite():
+    """S4_fix Fix 1's actual acceptance criterion: NOT that some test passes,
+    but that the real, shipped `index/tileplan/*.json` still holds all three
+    scales for all eight scenes after a full suite run -- checked against the
+    artifact on disk, not against any in-memory re-plan. Before Fix 1, three
+    writes in this file (now relocated to `tmp_path` above) truncated this
+    artifact to scale 448 only; this guards against that regression coming
+    back. If this fails, regenerate via
+    `env PYTHONNOUSERSITE=1 AERIAL_DATA_ROOT=<root> <python> src/tiling.py`
+    and confirm no other test still writes to the real index root."""
+    out_dir = config.get_index_root() / "tileplan"
+    files = sorted(out_dir.glob("*.json"))
+    assert len(files) == 8, f"expected 8 tileplan files under {out_dir}, found {len(files)}: {files}"
+    for f in files:
+        doc = json.loads(f.read_text())
+        assert set(doc.keys()) == {"448", "224", "112"}, (
+            f"{f.name}: shipped tileplan missing a scale, got {sorted(doc.keys())} -- "
+            "the real artifact was truncated (S4_fix Fix 1 regression)"
+        )

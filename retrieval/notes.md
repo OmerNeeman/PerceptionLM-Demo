@@ -1285,3 +1285,50 @@ ships. Sent back to fix the tests and prove the join from the real files.
 *Standing lesson, third instance in this project:* **check the artifact, not the
 report.** A green suite says the code is right; it says nothing about what is on
 disk — and here the suite was itself the thing corrupting the disk.
+
+---
+
+## s4-green — 2026-09-08 — S4 gated; and a hard limit found for S5
+
+**S4 is GREEN after one send-back.** 116 tests on the PM's own run.
+
+The acceptance criterion for the tileplan fix was deliberately **not** "the test
+passes" but "the artifact survives" — verified by running the full suite and
+then re-reading the files: **108,542 tiles, all three scales, all eight
+scenes.** The suite no longer destroys its own inputs.
+
+Export rebuilt at **384-d int8, 3.70 MB**, with a stored background query set.
+Re-measured overlap ~0.82 mean, matching the PM's ~0.833 within query-set noise.
+Latency 9-18 ms against a 200 ms budget; reload 0.13 s against 5 s.
+
+The fix round also turned up two real bugs while proving RED: `confidence_band`
+raised on numpy input, and `build_background`'s in-memory return used string
+keys where the reloaded copy used ints — silently breaking same-process use.
+Both the kind of thing that only surfaces when you actually exercise the path.
+
+### BLOCKER for S5 — a standalone file cannot embed typed text
+
+F-8 requires the export to open and query "with no server and no network".
+Answering a typed query means running the text tower. **Measured:**
+
+| | |
+|---|---|
+| RemoteCLIP total | 427.6 M params |
+| **text tower alone** | **123.7 M params** |
+| as fp16 | **247.3 MB** |
+| as int8 | 123.7 MB |
+| F-8 cap, *including thumbnails* | **16 MB** |
+
+**The text tower is 15.5x the entire budget in fp16, and 7.7x in int8.** No
+compression closes that gap; this is not a tuning problem.
+
+This is the same family as the F-8/U-8 conflict logged at S2 (tile Q&A needs a
+VLM, equally impossible offline). Both come from one root: **F-8's offline
+guarantee and the interactive premise are in tension, and the spec never
+resolved which wins.**
+
+Notably, `notes.md#intake` decision 3 already separated "full local index" from
+"the HTML viewer is a per-AOI export" — the two-component architecture was
+always there. What was never stated is that **free-text querying lives on the
+local side only**. Put to the owner rather than decided by the PM, because it
+determines what "explore the demo" means.

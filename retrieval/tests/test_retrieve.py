@@ -28,6 +28,7 @@ import retrieve
 import tiling
 
 PROBE = Path(__file__).resolve().parent / "_retrieve_reload_probe.py"
+CONFIDENCE_PROBE = Path(__file__).resolve().parent / "_confidence_probe.py"
 
 DEMO_AOI = "X605_Y3388"
 DEMO_REL_PATH = "X605_Y3388.tif"
@@ -216,6 +217,43 @@ def test_result_pixel_offsets_are_index_times_scale_not_index(corpus):
             assert loc["px_offset_x"] != rec["col"], "px_offset_x looks like the raw column index, not index*scale"
 
 
+def test_map_location_from_shipped_tileplan(production_corpus):
+    """S4_fix Fix 1's second half: F-10 must hold against the real, shipped
+    `index/tileplan/*.json` files, not only an in-memory re-plan. Before Fix
+    1 those files were truncated to scale 448 only (three tests in
+    test_tiling.py were overwriting them), which is why retrieve.py's own
+    join calls `tiling.plan_scene` directly rather than trusting the file
+    (see its module docstring). Now that Fix 1 regenerates the full
+    three-scale artifact, this reads THOSE files -- not `tiling.plan_scene`
+    a second time -- and cross-checks every production tile's location
+    against what is actually on disk."""
+    tileplan_dir = config.get_index_root() / "tileplan"
+    plan_cache: dict[tuple[str, int], dict] = {}
+    checked = 0
+    for tile in production_corpus.manifest["tiles"]:
+        rec = tiling.parse_tile_id(tile["tile_id"])
+        key = (rec["source_file"], rec["scale"])
+        if key not in plan_cache:
+            aoi = tiling.scene_aoi(rec["source_file"])
+            stem = Path(config.posix_key(rec["source_file"])).stem
+            fname = f"{aoi}__{stem}.json".replace("/", "_")
+            doc = json.loads((tileplan_dir / fname).read_text())
+            assert str(rec["scale"]) in doc, (
+                f"{fname}: shipped tileplan on disk is missing scale {rec['scale']} "
+                f"for {rec['source_file']}"
+            )
+            plan_cache[key] = {t["tile_id"]: t for t in doc[str(rec["scale"])]["tiles"]}
+        shipped = plan_cache[key][tile["tile_id"]]
+        loc = production_corpus.locations[tile["tile_id"]]
+        assert loc["px_offset_x"] == shipped["px_offset_x"]
+        assert loc["px_offset_y"] == shipped["px_offset_y"]
+        assert tuple(loc["bbox_lonlat"]) == tuple(shipped["bbox_lonlat"])
+        assert loc["source_file"] == shipped["source_file"]
+        assert loc["date"] == shipped["date"]
+        checked += 1
+    assert checked == len(production_corpus.manifest["tiles"]) == 9631
+
+
 # --------------------------------------------------------------------------
 # F-6 -- AOI filter restricts candidates by geographic bbox.
 # --------------------------------------------------------------------------
@@ -360,15 +398,24 @@ def test_query_latency_cpu(production_corpus, real_embedder):
 
 
 # --------------------------------------------------------------------------
-# U-3 -- the weak-match signal is a RELATIVE gap, never an absolute cosine
-# cut-off.
+# U-3 -- S4_fix Fix 2: the match indicator is a calibrated CONFIDENCE BAND
+# against a fixed background set, never a present/absent boolean. The old
+# `weak_match` boolean (`WEAK_GAP_MULTIPLE`, tuned on five values) was
+# measured by the PM to fail on unseen queries at both 112px and 448px, and
+# every one of eight relative statistics tried over 8 present/8 absent
+# queries overlapped between the groups -- see retrieve.py's U-3 section
+# banner. `test_weak_match_has_no_absolute_cosine_constant` below still
+# exercises `is_weak_match` directly (it is retained as an internal,
+# unit-tested helper nothing gates on); `rank_per_scale`'s output no longer
+# has a `weak_match` key at all.
 # --------------------------------------------------------------------------
 
 
 def test_calibration_scores_reproduce_brief_measurements(production_corpus, real_embedder):
-    """Sanity check before trusting the weak-match calibration below: this
-    exact index + embedder must reproduce the brief's stated 112 px top-1
-    scores (to loose tolerance -- they were read off a printed table)."""
+    """Sanity check before trusting the confidence-band measurements below:
+    this exact index + embedder must reproduce the brief's stated 112 px
+    top-1 scores (to loose tolerance -- they were read off a printed
+    table)."""
     for text, expected_top1 in CALIBRATION_QUERIES_112PX.items():
         qvec = retrieve.embed_query(text, embedder=real_embedder)
         out = retrieve.rank_per_scale(production_corpus, qvec, top_k=1)
@@ -378,23 +425,94 @@ def test_calibration_scores_reproduce_brief_measurements(production_corpus, real
         )
 
 
-def test_weak_match_is_relative(production_corpus, real_embedder):
-    """U-3: the known-absent control must be flagged weak; the four real
-    queries must not be, at 112 px -- the scale the brief's calibration data
-    covers (`retrieve.is_weak_match`'s docstring: 112/224/448 windows differ
-    enough that no single multiple is guaranteed clean at every scale for
-    every possible query -- documented there, not hidden)."""
-    weak_by_query = {}
+@pytest.fixture(scope="module")
+def production_background(real_embedder):
+    """Builds the real AOI's background reference set once per module -- the
+    artifact `confidence_band` is calibrated against (S4_fix Fix 2), stored
+    alongside the F-2a export (`retrieve.background_path`) so it is a
+    reproducible build artifact, not something recomputed per query."""
+    doc = retrieve.build_background(DEMO_AOI, embedder=real_embedder)
+    return doc["scores_by_scale"]
+
+
+def test_confidence_band_reported_never_gates_results(production_corpus, production_background, real_embedder):
+    """S4_fix Fix 2's actual requirement: every scale's ranking carries a
+    `confidence` band (never the retired `weak_match` boolean), the wording
+    never claims certainty of absence, and results are identical regardless
+    of the band -- this is an indicator shown alongside results, not a
+    filter. Deliberately does NOT assert that present and absent queries
+    land in different bands: the PM measured a large, honest overlap between
+    the two groups on this index, and tuning this test to hide that would be
+    exactly the overfitting Fix 2 exists to undo."""
     for text in CALIBRATION_QUERIES_112PX:
         qvec = retrieve.embed_query(text, embedder=real_embedder)
-        out = retrieve.rank_per_scale(production_corpus, qvec, top_k=10)
-        weak_by_query[text] = out["rankings"][112]["weak_match"]
+        out_with_bg = retrieve.rank_per_scale(
+            production_corpus, qvec, top_k=10, background=production_background
+        )
+        out_without_bg = retrieve.rank_per_scale(production_corpus, qvec, top_k=10)
+        for scale, ranking in out_with_bg["rankings"].items():
+            assert "weak_match" not in ranking, "the retired boolean must not reappear in the output"
+            confidence = ranking["confidence"]
+            assert confidence["band"] in {"low", "medium", "high"}
+            assert 0.0 <= confidence["percentile"] <= 100.0
+            assert "is not present" not in confidence["message"], (
+                "U-3 wording requirement: confidence must never claim certainty of absence"
+            )
+            if confidence["band"] == "low":
+                assert "may not be present" in confidence["message"]
+            # Never gates: identical results with/without a background set.
+            assert ranking["results"] == out_without_bg["rankings"][scale]["results"]
+        # No background reference available -> reported as "unknown", not raised.
+        for scale, ranking in out_without_bg["rankings"].items():
+            assert ranking["confidence"]["band"] == "unknown"
+            assert ranking["confidence"]["percentile"] is None
 
-    assert weak_by_query[KNOWN_ABSENT_QUERY] is True, "known-absent control was not flagged weak"
-    for text, weak in weak_by_query.items():
-        if text == KNOWN_ABSENT_QUERY:
-            continue
-        assert weak is False, f"real query {text!r} was incorrectly flagged weak"
+
+def test_confidence_band_is_relative():
+    """Proof, not assertion-by-inspection -- mirrors
+    `test_weak_match_has_no_absolute_cosine_constant`'s style:
+    `confidence_band`'s percentile/band is invariant under an arbitrary
+    positive affine rescale (`scores -> a*scores + b`, a > 0) applied
+    identically to `top_score` and to every background score. An
+    implementation hiding a fixed cosine cut-off would not be invariant;
+    an empirical percentile against the same background, rescaled the same
+    way, is."""
+    rng = np.random.default_rng(11)
+    background = rng.normal(loc=0.20, scale=0.02, size=30)
+    top_score = float(np.percentile(background, 80))
+
+    base = retrieve.confidence_band(top_score, background)
+    assert base["band"] in {"low", "medium", "high"}
+
+    for a, b in [(2.0, 0.0), (0.001, 5.0), (1000.0, -37.0), (50.0, 123.4)]:
+        out = retrieve.confidence_band(a * top_score + b, a * background + b)
+        assert out["band"] == base["band"], f"band changed under affine rescale a={a}, b={b}"
+        assert out["percentile"] == pytest.approx(base["percentile"]), (
+            f"percentile changed under affine rescale a={a}, b={b} -- "
+            "an absolute cosine constant must be hiding in the path"
+        )
+
+
+def test_confidence_band_reproducible(real_embedder, production_background, tmp_path):
+    """Same query, same band, across processes -- mirrors F-5's
+    `test_index_roundtrip_production` reload-probe pattern. Reloads both the
+    corpus and the background reference set from disk in a fresh process
+    (not the in-memory values this test's own process just computed)."""
+    qvec = retrieve.embed_query("a car", embedder=real_embedder)
+    corpus = retrieve.load_corpus(DEMO_AOI)
+    out = retrieve.rank_per_scale(corpus, qvec, top_k=1, background=production_background)
+    in_process = {str(scale): r["confidence"] for scale, r in out["rankings"].items()}
+
+    qvec_path = tmp_path / "qvec.npy"
+    np.save(qvec_path, qvec)
+    proc = subprocess.run(
+        [sys.executable, str(CONFIDENCE_PROBE), DEMO_AOI, str(config.get_index_root()), str(qvec_path)],
+        capture_output=True, text=True,
+        env=dict(os.environ, PYTHONNOUSERSITE="1", AERIAL_DATA_ROOT=str(config.get_data_root())),
+        check=True,
+    )
+    result = json.loads(proc.stdout)
+    assert result == in_process, "fresh-process reload gave a different confidence band"
 
 
 def test_weak_match_has_no_absolute_cosine_constant():

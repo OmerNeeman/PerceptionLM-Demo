@@ -197,7 +197,7 @@ def test_pca_overlap_measured_per_scale_production(real_embedder):
     reloaded = json.loads(proc.stdout)
     assert reloaded["n"] == 9631
     assert reloaded["dim"] == 768
-    assert reloaded["export_dim"] == 128
+    assert reloaded["export_dim"] == export_basis.EXPORT_DIM  # S4_fix Fix 3: 384, not the old 128
     assert reloaded["model_id"] == "RemoteCLIP-ViT-L-14"
 
     # "at least the six [calibration queries]" (F-2a): the five real
@@ -205,7 +205,7 @@ def test_pca_overlap_measured_per_scale_production(real_embedder):
     queries = ["tents", "palm trees", "a car", "dirt road", "aircraft carrier", "buildings"]
     overlap = export_basis.measure_overlap(DEMO_AOI, queries, embedder=real_embedder)
 
-    print("\nF-2a retrieval@10 overlap, full-precision vs PCA-128+int8, per scale:")
+    print(f"\nF-2a retrieval@10 overlap, full-precision vs PCA-{export_basis.EXPORT_DIM}+int8, per scale:")
     for scale in sorted(overlap):
         r = overlap[scale]
         print(f"  scale={scale:>4d} n={r['n']:>5d} mean_overlap={r['mean_overlap']:.3f}")
@@ -213,13 +213,37 @@ def test_pca_overlap_measured_per_scale_production(real_embedder):
             print(f"      {pq['query']!r:18s} overlap={pq['overlap']:.2f}")
 
     assert set(overlap.keys()) == {448, 224, 112}
+    mean_across_scales = float(np.mean([r["mean_overlap"] for r in overlap.values()]))
+    print(f"  mean across scales: {mean_across_scales:.3f} (S4_fix Fix 3 measured ~0.833 at 384d int8)")
     for scale, r in overlap.items():
         assert 0.0 <= r["mean_overlap"] <= 1.0
         # Regression guard (not a quality bar): the mean-centering bug this
         # module's docstring documents measured 0.00-0.10 at every scale;
-        # today's real number is ~0.68-0.73. This threshold catches a
+        # today's real number is ~0.68-0.73 at 128d. This threshold catches a
         # reintroduction of that bug without hard-coding today's exact figure.
         assert r["mean_overlap"] > 0.3, (
             f"scale {scale}: mean_overlap={r['mean_overlap']:.3f} looks like the "
             "mean-centering regression this module's docstring documents"
         )
+    # S4_fix Fix 3's own floor: 384d int8 should sit noticeably above the old
+    # 128d figure (~0.713 mean) -- not pinned to the exact measured 0.833 (a
+    # different embedder/query set run would jitter it), but tight enough to
+    # catch EXPORT_DIM silently reverting to 128 or the export going stale.
+    assert mean_across_scales > 0.75, (
+        f"mean overlap across scales={mean_across_scales:.3f} does not look like the ~0.833 "
+        "S4_fix Fix 3 measured at 384d int8 -- flag as blocked per the brief, do not tune around it"
+    )
+
+
+def test_export_dim_384():
+    """S4_fix Fix 3: EXPORT_DIM raised from 128 to 384, still int8 -- an
+    owner decision from the PM's measured accuracy-vs-size curve (see
+    export_basis.py's module docstring). Checks the artifact actually on
+    disk (built by the production overlap test above), not just the in-code
+    constant."""
+    assert export_basis.EXPORT_DIM == 384
+    exp = export_basis.load_export(DEMO_AOI)
+    assert exp["basis"]["export_dim"] == 384
+    assert exp["components"].shape == (384, 768)
+    assert exp["vectors_i8"].dtype == np.int8
+    assert exp["vectors_i8"].shape[1] == 384
