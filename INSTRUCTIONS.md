@@ -309,11 +309,80 @@ instead of re-deriving the correction by hand.
 
 ---
 
-## 9. Building an index, querying it, and exporting — not yet
+## 9. Building an index, querying it, and exporting
 
-This section is a placeholder. Tiling, embedding, indexing, query, and export
-are later stages of this project and do not exist as runnable commands yet.
-When they land, this section will state the actual commands, per-platform,
-with wall times and the hardware they were measured on — the same standard
-as everything above. Until then, do not expect a command here; there isn't
-one to invent.
+Tiling, embedding and indexing (§§F-1–F-2a) are earlier stages and already
+ran once against the real imagery; their output lives under
+`retrieval/index/` (gitignored, never committed) and is **not rebuilt** by
+anything below. The standalone-HTML exporter (F-8) is a separate, later
+stage (S5b) and does not exist yet. What *does* exist as of this stage (S5)
+is the local query app: type a description, get back ranked, located tiles
+with a confidence band and a resolution caveat.
+
+### Launch the local app
+
+```bash
+export PYTHONNOUSERSITE=1          # mandatory -- see §8/trap 1
+export CUDA_VISIBLE_DEVICES=0      # GPU 1 drives the desktop on the dev machine
+export AERIAL_DATA_ROOT=/path/to/your/imagery
+cd retrieval/src
+python app.py
+```
+
+```powershell
+$env:PYTHONNOUSERSITE = "1"
+$env:CUDA_VISIBLE_DEVICES = "0"
+$env:AERIAL_DATA_ROOT = "C:/path/to/your/imagery"
+cd retrieval/src
+python app.py
+```
+
+This starts a local web server at `http://127.0.0.1:8420/` — open that URL
+in a browser. Everything is inline (no external stylesheet/script, no CDN,
+no network call at runtime beyond the page talking to its own local
+server), so it works with no internet connection.
+
+Equivalently, via uvicorn's own CLI — note the `--factory` flag: the app
+target is a function that *builds* the app (so importing the module never
+forces a model load as a side effect), not a ready-made app object, so a
+bare `app:app` target will not work here:
+
+```bash
+python -m uvicorn app:create_app --factory --host 127.0.0.1 --port 8420
+```
+
+**What loads when.** The corpus (vectors + tile locations) loads at process
+start and is fast (< 5 s, no GPU — F-5's own budget). The embedding model
+loads lazily, on the *first* query — that call takes about **9 s** longer
+than every query after it, once per process, and the page says so
+("first search can take ~10s while the model loads"). This is
+`open_clip`'s `RemoteCLIP-ViT-L-14`; you may see it print
+`No pretrained weights loaded ... initialized randomly` in the *terminal*
+running the model-download/build stages elsewhere in this project — the
+app's own console output suppresses that specific line during its own load,
+because on first read it looks like a failure and is not one (a random
+skeleton is built before the real RemoteCLIP checkpoint loads over it).
+
+**Which AOI.** The app serves whichever AOI's index it finds under
+`retrieval/index/emb/` (default `X605_Y3388`, the project's demo AOI — see
+`docs/DATA.md`). Only presence/coarse-class queries are meaningful on it;
+damage vocabulary (rubble, collapsed roof) has no support on this AOI by
+design (`CLAUDE.md`'s ratified problem statement) — the app does not offer
+those as examples for that reason, not by omission.
+
+**Measured, this machine:** cold process start to a fully warmed, answered
+first query: corpus load ~0.3 s + model load ~9 s + first search
+< 1 ms (N-1's own budget, unaffected by the model). Every subsequent query
+in the same process: well under 300 ms end-to-end.
+
+### Tests
+
+```bash
+export AERIAL_DATA_ROOT=/path/to/your/imagery
+cd retrieval
+python -m pytest tests/test_app.py -v
+```
+
+Uses a small synthetic index built under `tmp_path` with the real embedder
+(mirrors every other stage's own test fixtures) — it does not touch the
+shipped `index/` and does not require the demo AOI's real imagery.

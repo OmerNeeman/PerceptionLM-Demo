@@ -1332,3 +1332,66 @@ Notably, `notes.md#intake` decision 3 already separated "full local index" from
 always there. What was never stated is that **free-text querying lives on the
 local side only**. Put to the owner rather than decided by the PM, because it
 determines what "explore the demo" means.
+
+---
+
+## s5-green — 2026-09-08 — **M1 REACHED.** The local app works.
+
+**135 tests pass** on the PM's own run. Tile plan intact at 108,542 across three
+scales after the suite; embedding index untouched; data-root digest unchanged.
+
+### PM verification — ran it, not read about it
+
+Launched the app against the production index and used it as an impatient user.
+
+**Consistency check that mattered most:** `a car` returns **+0.2650** at 112 px
+*through the API* — byte-identical to the score the PM measured directly against
+the index before S4 existed. The app is not quietly re-deriving anything.
+
+| abuse case | result |
+|---|---|
+| `a car` (first query) | 200, **7.9 s** — the lazy model load |
+| every subsequent query | 200, **20-70 ms** |
+| empty / whitespace | guiding empty state, no error |
+| 500 characters | 200, ranked results |
+| Hebrew | 200, ranked results |
+| nonsense string | 200, ranked results |
+| `penguins` (known-absent) | 200, results shown **with** a band — correct under the amended U-3 |
+| bbox matching nothing | 200, **zero results, no raise** (F-6) |
+| malformed bbox / malformed JSON | 422, handled |
+| **tracebacks or 500s anywhere** | **zero** |
+
+The rendered page carries U-5's caveat prominently and specifically ("35-45 cm,
+not the 10 cm pixel grid... `a car` and `a white car` retrieve the same crops,
+and the colour word makes results measurably worse... does not do
+attribute-level search"). Each scale row states **"scores are only comparable
+within this row"**. The confidence chip reads **"not a presence guarantee"**.
+Date control correctly reports "No dated imagery indexed for this AOI" rather
+than offering a filter that cannot work.
+
+### Two items carried, neither blocking
+
+- **The tile modal pushes its metadata below a scrollbar.** Polish, not a
+  defect; the enlarged crop is the point and it works.
+- **U-8 is partially met at M1 *by design*.** The larger view ships at S5; the
+  question box ships at **S5a** with F-9. The worker flagged that the brief was
+  narrower than `spec.md`'s own U-8 amendment rather than silently resolving it
+  — exactly right, and the spec now records the split so it reads as sequencing
+  rather than an unmet criterion.
+
+### Ledgered
+
+Two S4 tests rebuild the **cheap** `index/export/` derivatives (PCA basis,
+background set) against the real index by design. Same family as the tileplan
+defect but materially different: deterministic, seconds, and it regenerates
+rather than truncates. The expensive `index/emb/` pass is untouched. Recorded
+rather than fixed under M1 pressure.
+
+### What M1 actually demonstrates
+
+A user types a description and gets back the aerial tiles that match it, ranked
+by cosine similarity, with map locations, in tens of milliseconds — on real
+imagery, with nothing trained. The vehicle result is the one that was genuinely
+in doubt: **5/5 at 112 px, and 0/5 at 448 px for every candidate tested.** The
+multi-scale pyramid is not a refinement of this system; it is the reason it
+works at all.

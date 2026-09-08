@@ -252,6 +252,35 @@ that date's tiles only; the returned tile ids all carry that date.
 > and every returned id carries that date; an undated AOI returns nothing under
 > a date filter and does not raise.
 
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-08** (`notes.md#s4-green`).
+> **The system is two artifacts, and free-text querying lives on the local
+> side only.**
+>
+> **Was:** one exported HTML that "opens and queries with no server and no
+> network", implicitly for any text the user types.
+> **Now:**
+> 1. **Local query app** — arbitrary typed text, the full-precision index, tile
+>    Q&A (U-8, F-9). This is what the owner explores and judges.
+> 2. **Exported HTML** — standalone, offline, shareable, **querying a curated
+>    set of precomputed query vectors** (clickable, with type-to-filter over
+>    that set). No free text. No Q&A box.
+>
+> *Why unsatisfiable as written:* answering typed text requires the text tower.
+> **Measured: 123.7 M parameters — 247 MB fp16, 124 MB int8 — against a 16 MB
+> cap that must also hold ~9,631 thumbnails.** That is **15.5x the entire
+> budget**, and no compression closes a gap of that size. U-8's question box is
+> further out of reach still, needing a VLM.
+> *This is not a scope cut made for convenience.* `notes.md#intake` decision 3
+> already separated "full local index" from "the HTML viewer is a per-AOI
+> export"; the two-component architecture was always the design. What was never
+> stated is which capabilities live on which side. This states it.
+> *What is preserved:* F-8's offline guarantee — the single property that makes
+> the export worth sharing — is kept intact rather than traded away for an
+> interactivity the format cannot support.
+> *Precomputed query set:* ~200 phrases spanning the four vocabularies the owner
+> named (small objects, structures, terrain, damage), stored as 384-d int8.
+> **77 KB** — a rounding error against the cap.
+
 **F-8 — The exporter writes a standalone HTML under the size cap.**
 *Expected:* for a chosen AOI + date subset the output is a single file,
 <= 16 MB, containing embedded thumbnails and embeddings, opening and querying
@@ -472,6 +501,17 @@ scroll.
 
 **U-8 — A tile opens.** Clicking a result gives a larger view plus its
 question box; the answer appears attached to that tile, not in a global log.
+
+> **AMENDED — owner signed off 2026-09-08** (`notes.md#s4-green`).
+> **Local app:** U-8 in full, question box included (F-9's swappable backend) —
+> the larger-view half ships at **S5**, the question box at **S5a** with F-9.
+> U-8 is therefore *partially* met at M1 by design, not by omission: S5's brief
+> deliberately excluded a placeholder box, because an affordance that cannot yet
+> work is worse than its absence.
+> **Exported HTML:** a tile opens to a larger view with its score, scale, date
+> and lat/lon — **no question box.** A VLM cannot run in a 16 MB offline file.
+> Do not render a disabled or placeholder question box in the export; an
+> affordance that cannot work is worse than its absence.
 
 ---
 
