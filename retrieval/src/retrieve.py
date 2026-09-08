@@ -156,6 +156,101 @@ def load_corpus(aoi: str, index_root: Path | None = None, data_root: Path | None
     )
 
 
+def load_corpus_multi(
+    aois: Sequence[str], index_root: Path | None = None, data_root: Path | None = None
+) -> Corpus:
+    """Load and concatenate several AOIs' corpora into one `Corpus` -- brief
+    S6, Part 3's "all AOIs" option. Cross-AOI ranking within a scale is
+    legitimate (one embedder, one embedding space -- F-1a already guarantees
+    every on-disk index shares model id and revision), so this is a plain
+    concatenation, not a re-embedding or a re-normalisation.
+
+    Reuses `load_corpus` per AOI verbatim -- this function only stacks their
+    results, it does not re-open rasters or re-touch `embed_index.load_index`.
+    Tile ids are globally unique across AOIs (every id's first `::`-separated
+    component is its own AOI, `tiling.make_tile_id`), so `locations` merges
+    with no key collisions and no tile can be double-counted.
+
+    Raises `embed_index.MixedEmbedderError` if the AOIs were not all built
+    with the same model id and revision -- F-1a's guarantee must hold across
+    AOIs too, not just within one, before any of their vectors are ever
+    compared against a single query vector.
+    """
+    if not aois:
+        raise ValueError("load_corpus_multi: no AOIs given")
+    corpora = [load_corpus(a, index_root=index_root, data_root=data_root) for a in aois]
+
+    model_ids = {c.manifest["model_id"] for c in corpora}
+    revisions = {c.manifest["revision"] for c in corpora}
+    if len(model_ids) > 1 or len(revisions) > 1:
+        raise embed_index.MixedEmbedderError(
+            f"load_corpus_multi({list(aois)!r}): indexed AOIs do not share one "
+            f"embedder -- model_ids={sorted(model_ids)}, revisions={sorted(revisions)} "
+            f"-- F-1a requires exactly one embedder across the whole index, "
+            f"combined AOIs included."
+        )
+
+    scales = list(corpora[0].manifest["scales"])
+    for c in corpora[1:]:
+        if list(c.manifest["scales"]) != scales:
+            raise ValueError(
+                f"load_corpus_multi: AOI {c.aoi!r} was built with scales "
+                f"{c.manifest['scales']!r}, expected {scales!r} (from AOI "
+                f"{corpora[0].aoi!r}) -- every AOI in a combined corpus must "
+                f"share the same SCALES pyramid."
+            )
+
+    vectors = np.concatenate([c.vectors for c in corpora], axis=0)
+    tiles: list[dict] = []
+    for c in corpora:
+        tiles.extend(c.manifest["tiles"])
+    tile_scales = np.array([t["scale"] for t in tiles], dtype=np.int64)
+    scale_indices = {s: np.where(tile_scales == s)[0] for s in scales}
+
+    locations: dict[str, dict] = {}
+    for c in corpora:
+        locations.update(c.locations)
+
+    # Ground extent (F-4's true-metres label) can genuinely differ across
+    # AOIs in different CRS regimes (46.91 m in leb's Mercator vs 44.80 m in
+    # the UTM scenes -- docs/DATA.md, a real 4.7% difference, not an error).
+    # A combined corpus reports the tile-count-weighted mean per scale and
+    # warns, exactly the pattern `_build_locations_and_extents` already uses
+    # when one AOI's own sources disagree -- never invented or hardcoded.
+    ground_extent_m: dict[int, float] = {}
+    for s in scales:
+        weighted = [(c.ground_extent_m.get(s), c.scale_indices.get(s, np.empty(0)).size) for c in corpora]
+        weighted = [(v, n) for v, n in weighted if v is not None and n > 0]
+        distinct = sorted(set(round(v, 6) for v, _ in weighted))
+        if len(distinct) > 1:
+            log.warning(
+                "retrieve: combined corpus %s scale %d spans AOIs with different "
+                "true ground extent (%s m) -- using the tile-count-weighted mean "
+                "for the row label; per-AOI values remain exact",
+                "+".join(aois), s, distinct,
+            )
+        total_n = sum(n for _, n in weighted)
+        ground_extent_m[s] = (sum(v * n for v, n in weighted) / total_n) if total_n else None
+
+    merged_manifest = {
+        "aoi": "+".join(sorted(aois)),
+        "model_id": corpora[0].manifest["model_id"],
+        "revision": corpora[0].manifest["revision"],
+        "dim": corpora[0].manifest["dim"],
+        "dtype": corpora[0].manifest["dtype"],
+        "scales": scales,
+        "tiles": tiles,
+    }
+    return Corpus(
+        aoi=merged_manifest["aoi"],
+        manifest=merged_manifest,
+        vectors=vectors,
+        scale_indices=scale_indices,
+        locations=locations,
+        ground_extent_m=ground_extent_m,
+    )
+
+
 def _build_locations_and_extents(
     manifest: dict, data_root: Path | None = None
 ) -> tuple[dict[str, dict], dict[int, float]]:

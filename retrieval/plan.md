@@ -186,7 +186,9 @@ never burn past it.
 | S3 | **GREEN** | 9,631 vectors over the demo AOI at 242 tiles/sec. Mandatory review found 3 defects, all fixed and PM-verified (NaN/Inf now raise, resume validates state, sanity bound now tested). **PM ran a real end-to-end query: "a car" returns 5/5 genuine vehicles.** N-4 amended, owner-signed | — |
 | S4 | **GREEN** | 116 tests. PM verified the acceptance criterion that matters: `index/tileplan/*.json` **survived a full suite run** at 108,542 across 3 scales. Export 384-d int8, 3.70 MB. Latency 9-18 ms vs 200 ms. U-3 amended, `EXPORT_DIM` raised |
 | S5 | **GREEN -> M1** | local app live. **135 tests.** PM ran it: `a car` +0.2650 at 112 px through the API, matching the direct measurement; 9 abuse cases, **zero tracebacks**; first query 7.9 s, then 20-70 ms | owner explores |
-| S5b | not started | standalone HTML export (precomputed queries, <=16 MB) | brief after owner feedback |
+| S6 | **GREEN** | all 8 scenes: 104,374 + 4,168 = **108,542** exact. `leb` splits 20,944/20,944 so F-7 halves precisely. N-1 **65.7 ms** end-to-end vs 200 ms. 237 tiles/sec | — |
+| S5b | **GREEN (handback unfinished)** | `export.html` **10.13 MB** / 16 MB cap, **zero external refs**, basemap + client-side crop, U-5 caveat intact. Agent died before the size table and ranking-parity check | PM to re-verify parity |
+| polish | **not done** | agent died on the spend limit before starting | re-dispatch after 13:20 |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |

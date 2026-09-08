@@ -1395,3 +1395,61 @@ imagery, with nothing trained. The vehicle result is the one that was genuinely
 in doubt: **5/5 at 112 px, and 0/5 at 448 px for every candidate tested.** The
 multi-scale pyramid is not a refinement of this system; it is the reason it
 works at all.
+
+---
+
+## s6-s5b — 2026-09-08 — full index, shareable export; three agents lost to a spend limit
+
+### S6 — all 8 scenes indexed. PM-verified.
+
+| check | result |
+|---|---|
+| embedded + skipped | **104,374 + 4,168 = 108,542** — reconciles exactly |
+| `leb` by date | **20,944 / 20,944** — F-7 halves the pool *exactly*, not approximately |
+| N-1 end-to-end at full scale | **65.7 ms mean, 104.5 ms max** vs a 200 ms budget |
+| N-1 raw dot product (PM) | 6.2 ms mean, 10.7 ms max — measures a different thing; quote the end-to-end figure |
+| throughput | **237 tiles/sec**, consistent with S3's 242 |
+| peak RSS, full index | **1,419.6 MiB** (vectors alone are 321 MB fp32) |
+| corpus load | inside F-5's 5 s |
+
+The throughput figure is worth keeping: at ~5 tiles/sec the CPU-shadow trap would
+have turned a 7-minute build into six hours **while looking fine throughout**.
+237 tiles/sec is the evidence that `PYTHONNOUSERSITE=1` held on every one of
+those invocations, not an assumption that it did.
+
+*The destruction pair is now reachable* — `leb` 2022-10-29 (intact village core)
+against 2025-06-06 (the same pixels as rubble). That is the most compelling
+content in the corpus and it was unreachable an hour ago.
+
+### S5b — the shareable export exists
+
+**`index/export/X605_Y3388/export.html`, 10.13 MB against the 16 MB cap**, with
+**zero external references** (no CDN, no font, no analytics — grep finds no
+`http(s)://` at all). One embedded basemap JPEG rather than 9,631 thumbnails,
+cropped client-side from grid indices: the design decision that made the budget
+fit with 6 MB to spare.
+
+U-5's caveat survived into the artifact, which is the thing that mattered most
+given this file reaches people who cannot ask what it means:
+
+> *"...effective optical resolution is approximately 35-45 cm on the ground (the
+> 10-12 cm pixel grid is upsampled 3-4x). The system can indicate presence and a
+> coarse class of object — it cannot support fine attribute search (colour,
+> make, model, exact count). Treat every result as 'something like this may be
+> here', not a confirmed identification."*
+
+*PM note on method:* a first grep for the caveat returned zero and looked like a
+missing requirement. It was **HTML-entity encoding** (`&ndash;`) defeating the
+pattern, not an absent caveat. Worth recording as a near-miss: a negative grep
+result is evidence about the pattern before it is evidence about the artifact.
+
+### Three agents died on a spend limit, mid-stage
+
+S6 (after its work landed), S5b (after building the export and passing its 12
+tests, before the size table and full suite) and the polish pass (before doing
+anything). The PM completed verification directly rather than re-dispatching.
+
+**Unfinished and carried:** S5b's handback, its export/local ranking-parity
+check, and the whole polish pass (modal metadata, `pyproj` startup warning,
+S4 tests touching `index/export/`, the measured-RSS note in `INSTRUCTIONS.md`).
+None blocks use; all are recorded rather than quietly dropped.
