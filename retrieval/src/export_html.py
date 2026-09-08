@@ -83,6 +83,7 @@ import datetime
 import io
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Sequence
@@ -109,6 +110,43 @@ EXPORT_SIZE_CAP_BYTES = 16 * 1024 * 1024
 #: "it degrades gracefully; dropping tiles or precision does not"). Tried
 #: largest-first; the first rung that fits under the cap wins.
 BASEMAP_RESOLUTION_LADDER: tuple[int, ...] = (4096, 3200, 2560, 2048, 1600, 1280, 1024, 768, 512)
+
+#: S5c defect 2: basemap reduction alone cannot save an AOI whose *vectors*
+#: already exceed the cap before any basemap exists (`leb`: two dates over
+#: one footprint, 41,888 tiles -- at EXPORT_DIM 384 int8 the vectors alone
+#: are 16.1 MB, over the 16 MB cap with zero basemap bytes). Tried
+#: largest-first, same convention as BASEMAP_RESOLUTION_LADDER: for each
+#: dim, the full basemap ladder is tried before stepping down again. Tiles
+#: are still never dropped (N-6) -- this trades vector precision, not tile
+#: count, and only after basemap reduction alone has been exhausted for
+#: that dim.
+EXPORT_DIM_LADDER: tuple[int, ...] = (384, 256, 192, 128)
+
+#: S5c ADDENDUM: "legibility has a floor; fidelity does not." A tile at the
+#: *finest* scale must render from at least this many real basemap pixels
+#: before display upscaling, or a viewer cannot tell rubble from an intact
+#: roof -- the exact question damage-vocabulary AOIs exist to answer. The
+#: original ladder order (basemap degrades first, EXPORT_DIM only as a last
+#: resort) starved `leb`'s imagery to protect a fidelity number nobody can
+#: see (7 real px for a 112 px tile). The fix reorders the ladder: hold the
+#: basemap at or above this floor and step EXPORT_DIM down *first* to fund
+#: it; only once every EXPORT_DIM has been tried at-or-above the floor and
+#: still does not fit may the basemap drop below it (and then the footer
+#: must say so -- see `_assemble_payload`/`_render_html`).
+MIN_RENDERED_TILE_PX = 24
+
+#: Small, fixed, deterministic subset of PRECOMPUTED_QUERIES used to
+#: re-measure retrieval@10 overlap against full precision at whatever
+#: EXPORT_DIM a build actually lands on (brief: figures measured on one AOI
+#: must not be quoted for another -- re-measure per AOI). Spans all four
+#: vocabularies so a damage-heavy AOI's fidelity number is not measured on
+#: small-object text alone.
+OVERLAP_MEASURE_QUERIES: tuple[str, ...] = (
+    "a car", "a truck", "tents",
+    "a building with a flat roof", "buildings",
+    "sand", "palm trees",
+    "rubble", "a collapsed building",
+)
 
 DEFAULT_JPEG_QUALITY = 82
 
@@ -227,6 +265,46 @@ def precomputed_query_texts() -> list[str]:
     return [t for _, t in PRECOMPUTED_QUERIES]
 
 
+# --------------------------------------------------------------------------
+# S5c defect 1 -- a curated subset shown at rest, and a per-AOI default
+# query that runs on load so the tile grid (the actual product) is on
+# screen before any click, instead of 226 chips and an empty page. The
+# filter box still reaches the full set (`nearestQueries`/`renderChips` in
+# UI_JS); this only changes what is shown *by default*.
+# --------------------------------------------------------------------------
+
+#: 2-3 per category, chosen for range, not tuned against any one AOI's
+#: scores -- <= 20 (well under it, ~10) per the brief's "8-12" guidance.
+CURATED_QUERIES: tuple[str, ...] = (
+    "a car", "a truck", "tents",
+    "buildings", "a flat roof",
+    "sand", "palm trees",
+    "rubble", "a collapsed building", "debris",
+)
+
+#: Which precomputed query auto-runs on load. Per-AOI because which
+#: vocabulary actually has hits is AOI-specific (CLAUDE.md's ratification
+#: note: damage is not answerable on X605_Y3388 -- it is what leb's
+#: 2022->2025 pair contains). Falls back to a small-object query for any
+#: AOI not listed here.
+DEFAULT_QUERY_BY_AOI: dict[str, str] = {
+    "X605_Y3388": "a car",
+    "leb": "rubble",
+}
+DEFAULT_QUERY_FALLBACK = "a car"
+
+
+def curated_query_indices() -> list[int]:
+    texts = precomputed_query_texts()
+    return [texts.index(t) for t in CURATED_QUERIES]
+
+
+def default_query_index(aoi: str) -> int:
+    texts = precomputed_query_texts()
+    text = DEFAULT_QUERY_BY_AOI.get(aoi, DEFAULT_QUERY_FALLBACK)
+    return texts.index(text)
+
+
 def export_html_path(aoi: str, index_root: Path | None = None) -> Path:
     return export_basis.export_dir(aoi, index_root) / EXPORT_HTML_NAME
 
@@ -320,6 +398,41 @@ def _b64(arr: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode("ascii")
 
 
+def _unique_source_files(corpus: "retrieve.Corpus") -> list[dict]:
+    """One entry per distinct `source_file` (relPath, date), in first-seen
+    order -- the geometry-only half of what `_build_sources_and_tiles` needs,
+    factored out so the S5c basemap floor (`_basemap_floor_px`) can compute
+    it without also touching vectors."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for t in corpus.manifest["tiles"]:
+        loc = corpus.locations[t["tile_id"]]
+        sf = loc["source_file"]
+        if sf not in seen:
+            seen.add(sf)
+            out.append({"relPath": sf, "date": loc["date"]})
+    return out
+
+
+def _basemap_floor_px(sources: list[dict], data_root: Path | None, finest_scale_px: int) -> int:
+    """S5c ADDENDUM: the smallest basemap long-side (px) that renders a
+    finest-scale tile at >= `MIN_RENDERED_TILE_PX` real pixels, for the
+    *widest* of this AOI's source rasters (worst case -- if one date's scene
+    is narrower than another, satisfying the floor for the wider one
+    satisfies it for both). Header-only reads (`rasterio.open` without
+    `.read()`), same D-3 read-only discipline as `_build_basemap`."""
+    if finest_scale_px <= 0:
+        return 0
+    root = data_root or config.get_data_root()
+    max_width = 0
+    for src in sources:
+        with rasterio.open(root / src["relPath"]) as ds:
+            max_width = max(max_width, ds.width)
+    if max_width == 0:
+        return 0
+    return math.ceil(MIN_RENDERED_TILE_PX / finest_scale_px * max_width)
+
+
 def _build_sources_and_tiles(corpus: "retrieve.Corpus", vectors_i8_full: np.ndarray) -> tuple[list[dict], dict]:
     """`sources` (one entry per distinct source_file: relPath, date) and, per
     scale, packed columns (vectors int8, srcIdx, pxOffsetX/Y int16, bbox
@@ -331,16 +444,8 @@ def _build_sources_and_tiles(corpus: "retrieve.Corpus", vectors_i8_full: np.ndar
     requantised (that would throw away precision twice for nothing: the
     shipped bytes are exactly the S4 export's own bytes).
     """
-    source_order: list[str] = []
-    source_lookup: dict[str, int] = {}
-    sources: list[dict] = []
-    for t in corpus.manifest["tiles"]:
-        loc = corpus.locations[t["tile_id"]]
-        sf = loc["source_file"]
-        if sf not in source_lookup:
-            source_lookup[sf] = len(source_order)
-            source_order.append(sf)
-            sources.append({"relPath": sf, "date": loc["date"]})
+    sources = _unique_source_files(corpus)
+    source_lookup: dict[str, int] = {s["relPath"]: i for i, s in enumerate(sources)}
 
     per_scale: dict[int, dict] = {}
     for scale in corpus.manifest["scales"]:
@@ -640,8 +745,18 @@ UI_JS = r"""
   var elModal = document.getElementById("tile-modal");
   var elModalBody = document.getElementById("tile-modal-body");
   var elModalClose = document.getElementById("tile-modal-close");
+  var elShowAllToggle = document.getElementById("show-all-toggle");
+  var elChipModeLabel = document.getElementById("chip-mode-label");
   var basemapImgs = {};
   var currentQueryIndex = null;
+  var currentIsExample = false;
+  var showAllQueries = false;
+  // Result thumbnails are drawn at a fixed intrinsic resolution higher than
+  // any CSS display size (desktop or the 480px-breakpoint mobile size), so
+  // the canvas is only ever scaled down, never blurrily scaled up -- CSS
+  // alone controls how large it *reads* per breakpoint (S5c defect 1: the
+  // 112px-scale row is where small objects live and was the least legible).
+  var RESULT_THUMB_PX = 160;
 
   function fmtScore(s) {
     var v = s.toFixed(4);
@@ -688,10 +803,31 @@ UI_JS = r"""
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, destPx, destPx);
   }
 
+  function renderCuratedChips() {
+    var row = document.createElement("div");
+    row.className = "chip-row";
+    for (var i = 0; i < DATA.curatedQueryIndices.length; i++) {
+      var qi = DATA.curatedQueryIndices[i];
+      row.appendChild(makeChip(DATA.queries[qi].text, qi));
+    }
+    elChips.appendChild(row);
+  }
+
   function renderChips(filterText) {
     elChips.innerHTML = "";
     elNoMatch.innerHTML = "";
     var needle = (filterText || "").toLowerCase().trim();
+
+    if (!needle && !showAllQueries) {
+      if (elChipModeLabel) {
+        elChipModeLabel.textContent = "Showing " + DATA.curatedQueryIndices.length + " of " +
+          DATA.queries.length + " queries, a sample across all four categories.";
+      }
+      renderCuratedChips();
+      return;
+    }
+    if (elChipModeLabel) elChipModeLabel.textContent = needle ? "" : "Showing all " + DATA.queries.length + " queries.";
+
     var byCategory = {};
     var anyMatch = false;
     for (var i = 0; i < DATA.queries.length; i++) {
@@ -749,7 +885,7 @@ UI_JS = r"""
     b.className = "chip";
     b.textContent = text;
     if (queryIndex === currentQueryIndex) b.classList.add("chip-active");
-    b.addEventListener("click", function () { runQuery(queryIndex); });
+    b.addEventListener("click", function () { runQuery(queryIndex, false); });
     return b;
   }
 
@@ -769,8 +905,9 @@ UI_JS = r"""
     elFilterBarText.textContent = "Date filter: " + d + (currentQueryIndex !== null ? " -- " + count + " result(s) shown" : "");
   }
 
-  function runQuery(queryIndex) {
+  function runQuery(queryIndex, isExample) {
     currentQueryIndex = queryIndex;
+    currentIsExample = !!isExample;
     elResults.innerHTML = "<div class=\"searching\">Searching...</div>";
     updateFilterBar();
     renderChips(elFilter.value);
@@ -784,7 +921,15 @@ UI_JS = r"""
     elResults.innerHTML = "";
     var heading = document.createElement("div");
     heading.className = "results-heading";
-    heading.textContent = "\"" + result.query + "\"" + (elapsed > 1 ? " (" + elapsed.toFixed(0) + " ms)" : "");
+    if (currentIsExample) {
+      var badge = document.createElement("span");
+      badge.className = "example-badge";
+      badge.textContent = "Example query";
+      heading.appendChild(badge);
+    }
+    var qtext = document.createElement("span");
+    qtext.textContent = "\"" + result.query + "\"" + (elapsed > 1 ? " (" + elapsed.toFixed(0) + " ms)" : "");
+    heading.appendChild(qtext);
     elResults.appendChild(heading);
 
     for (var s = 0; s < DATA.scales.length; s++) {
@@ -831,7 +976,7 @@ UI_JS = r"""
     card.className = "result-card";
     var canvas = document.createElement("canvas");
     canvas.className = "result-thumb";
-    drawCrop(canvas, result, 96);
+    drawCrop(canvas, result, RESULT_THUMB_PX);
     card.appendChild(canvas);
     var score = document.createElement("div");
     score.className = "result-score";
@@ -879,6 +1024,15 @@ UI_JS = r"""
   elDateSelect.addEventListener("change", function () { updateFilterBar(); if (currentQueryIndex !== null) renderResults(currentQueryIndex); });
   elClearDate.addEventListener("click", function () { elDateSelect.value = "__all__"; updateFilterBar(); if (currentQueryIndex !== null) renderResults(currentQueryIndex); });
 
+  if (elShowAllToggle) {
+    elShowAllToggle.textContent = "Show all " + DATA.queries.length + " queries";
+    elShowAllToggle.addEventListener("click", function () {
+      showAllQueries = !showAllQueries;
+      elShowAllToggle.textContent = showAllQueries ? "Show curated examples only" : "Show all " + DATA.queries.length + " queries";
+      renderChips(elFilter.value);
+    });
+  }
+
   (function initDateFilter() {
     var dates = uniqueDates();
     var optAll = document.createElement("option");
@@ -894,7 +1048,16 @@ UI_JS = r"""
   })();
 
   renderChips("");
-  preloadBasemaps(function () {});
+  // S5c defect 1: run a query on load so the tile grid -- the actual
+  // product -- is on screen before any click, instead of chips and an
+  // empty page. `preloadBasemaps`'s callback repaints once the data: URI
+  // images are decoded, so a card drawn before that (or a card whose image
+  // was still loading) swaps its grey placeholder for the real crop rather
+  // than staying blank.
+  runQuery(DATA.defaultQueryIndex, true);
+  preloadBasemaps(function () {
+    if (currentQueryIndex !== null) renderResults(currentQueryIndex);
+  });
 })();
 """
 
@@ -915,11 +1078,19 @@ header p { margin: 0; font-size: 12px; color: #cfcfcf; }
 }
 .caveat strong { display: block; margin-bottom: 2px; }
 main { padding: 12px 16px 40px; max-width: 100%; }
-.search-wrap { margin-bottom: 12px; }
+.query-picker { margin-top: 22px; padding-top: 14px; border-top: 1px solid #e2e2e2; }
+.query-picker-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: #555; margin: 0 0 10px; }
+.search-wrap { margin-bottom: 8px; }
 .search-wrap input {
   width: 100%; max-width: 480px; padding: 8px 10px; font-size: 14px;
   border: 1px solid #bbb; border-radius: 6px;
 }
+.filter-hint { font-size: 12px; color: #666; margin: 0 0 10px; }
+.filter-hint button {
+  border: 1px solid #99a; background: #eef1ff; color: #2c3e91; border-radius: 4px;
+  padding: 2px 7px; cursor: pointer; font-size: 12px;
+}
+#chip-mode-label { display: block; margin-bottom: 2px; }
 .filter-bar {
   display: flex; align-items: center; gap: 10px; background: #eef; border: 1px solid #ccd;
   border-radius: 6px; padding: 6px 10px; margin-bottom: 12px; font-size: 12.5px; flex-wrap: wrap;
@@ -938,7 +1109,11 @@ main { padding: 12px 16px 40px; max-width: 100%; }
 .chip-active { background: #2c3e91; color: #fff; border-color: #2c3e91; }
 .no-match-msg { background: #fdecec; border: 1px solid #e5b3b3; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
 .no-match-msg p { margin: 0 0 6px; font-size: 13px; }
-.results-heading { font-size: 15px; font-weight: 600; margin: 14px 0 8px; }
+.results-heading { font-size: 16px; font-weight: 600; margin: 4px 0 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.example-badge {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+  background: #2c3e91; color: #fff; border-radius: 10px; padding: 2px 9px;
+}
 .searching { font-size: 13px; color: #777; padding: 10px 0; }
 .scale-row { background: #fff; border: 1px solid #e2e2e2; border-radius: 8px; padding: 10px; margin-bottom: 12px; max-width: 100%; overflow: hidden; }
 .scale-row-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
@@ -950,11 +1125,11 @@ main { padding: 12px 16px 40px; max-width: 100%; }
 .conf-unknown { background: #eee; color: #555; border-color: #ccc; }
 .conf-message { font-size: 11.5px; color: #666; margin-top: 4px; }
 .empty-row { font-size: 12.5px; color: #777; padding: 10px 0; }
-.result-strip { display: flex; gap: 10px; overflow-x: auto; padding: 8px 2px; max-width: 100%; }
-.result-card { flex: 0 0 auto; width: 96px; cursor: pointer; text-align: center; }
-.result-thumb { width: 96px; height: 96px; border-radius: 4px; border: 1px solid #ddd; background: #ddd; image-rendering: -webkit-optimize-contrast; }
-.result-score { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12px; margin-top: 4px; white-space: pre; }
-.result-date { font-size: 10.5px; color: #777; }
+.result-strip { display: flex; gap: 12px; overflow-x: auto; padding: 8px 2px; max-width: 100%; }
+.result-card { flex: 0 0 auto; width: 150px; cursor: pointer; text-align: center; }
+.result-thumb { width: 150px; height: 150px; border-radius: 5px; border: 1px solid #ddd; background: #ddd; image-rendering: -webkit-optimize-contrast; }
+.result-score { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; font-size: 12.5px; margin-top: 5px; white-space: pre; }
+.result-date { font-size: 11px; color: #777; }
 .tile-modal {
   position: fixed; inset: 0; background: rgba(0,0,0,0.55); display: flex;
   align-items: center; justify-content: center; padding: 16px; z-index: 10;
@@ -969,7 +1144,7 @@ main { padding: 12px 16px 40px; max-width: 100%; }
 .modal-note { font-size: 11.5px; color: #777; margin-top: 10px; }
 footer { padding: 12px 16px; font-size: 11px; color: #888; }
 @media (max-width: 480px) {
-  .result-card, .result-thumb { width: 78px; height: 78px; }
+  .result-card, .result-thumb { width: 112px; height: 112px; }
   header h1 { font-size: 16px; }
 }
 """
@@ -988,6 +1163,42 @@ def _render_html(payload: dict) -> str:
     data_json = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
     aoi = payload["aoi"]
     generated_at = payload["generatedAt"]
+    n_queries = len(PRECOMPUTED_QUERIES)
+
+    # S5c defect 2: state this export's own fidelity somewhere a reader can
+    # find it -- figures measured on one AOI must never be quoted for
+    # another, so this is computed fresh per build (`_measure_export_overlap`),
+    # not a constant.
+    export_dim = payload.get("exportDim")
+    overlap_summary = payload.get("overlapSummary") or {}
+    overall_overlap = overlap_summary.get("overall_mean_overlap")
+    n_overlap_queries = len(overlap_summary.get("queries", []))
+    if overall_overlap is not None:
+        fidelity_note = (
+            f" Tile vectors are compressed to {export_dim}-d int8 for this export "
+            f"(mean retrieval@10 overlap vs. full precision: {overall_overlap:.3f}, measured on "
+            f"this AOI over {n_overlap_queries} sample queries spanning all four vocabularies)."
+        )
+    else:
+        fidelity_note = f" Tile vectors are compressed to {export_dim}-d int8 for this export."
+
+    # S5c ADDENDUM: legibility has a floor; fidelity does not. State it
+    # explicitly, and only, when the floor was actually breached -- a
+    # basemap that meets the floor needs no extra footer text, since
+    # `MIN_RENDERED_TILE_PX` renders through the caveat above already.
+    if payload.get("basemapFloorBreached"):
+        rendered_px = payload.get("renderedFinestPx")
+        min_px = payload.get("minRenderedTilePx", MIN_RENDERED_TILE_PX)
+        rendered_txt = f"{rendered_px:.1f}" if rendered_px is not None else "?"
+        floor_note = (
+            f" <strong>Basemap resolution notice:</strong> even at the smallest exported "
+            f"vector dimension ({export_dim}-d), this AOI did not fit under the {EXPORT_SIZE_CAP_BYTES // (1024*1024)} MB "
+            f"cap with the basemap held at the {min_px} px finest-tile legibility floor, so the "
+            f"basemap was reduced below it. Finest-scale tiles here render from approximately "
+            f"{rendered_txt} real px before display upscaling."
+        )
+    else:
+        floor_note = ""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1011,9 +1222,6 @@ def _render_html(payload: dict) -> str:
   identification.
 </div>
 <main>
-  <div class="search-wrap">
-    <input id="filter-input" type="text" placeholder="Filter the {len(PRECOMPUTED_QUERIES)} precomputed queries (e.g. 'roof', 'road', 'debris')&hellip;" autocomplete="off">
-  </div>
   <div class="date-filter-wrap">
     Date filter: <select id="date-filter"></select>
   </div>
@@ -1021,14 +1229,25 @@ def _render_html(payload: dict) -> str:
     <span id="filter-bar-text"></span>
     <button id="clear-date-filter" type="button">Clear</button>
   </div>
-  <div id="no-match"></div>
-  <div id="query-chips"></div>
   <div id="results"></div>
+  <div class="query-picker">
+    <h2 class="query-picker-title">Try another query</h2>
+    <div class="search-wrap">
+      <input id="filter-input" type="text" placeholder="Filter the {n_queries} precomputed queries (e.g. 'roof', 'road', 'debris')&hellip;" autocomplete="off">
+    </div>
+    <p class="filter-hint">
+      <span id="chip-mode-label"></span>
+      {n_queries} queries available &mdash; start typing above to search them, or
+      <button id="show-all-toggle" type="button">show all</button>.
+    </p>
+    <div id="no-match"></div>
+    <div id="query-chips"></div>
+  </div>
 </main>
 <footer>
-  This file answers only the {len(PRECOMPUTED_QUERIES)} precomputed queries above &mdash; it carries
+  This file answers only the {n_queries} precomputed queries above &mdash; it carries
   no text model and cannot answer arbitrary text. Free-text search and tile question-answering
-  are available only in the local application. Model: {payload.get("modelId", "")} (revision {payload.get("revision", "")}).
+  are available only in the local application. Model: {payload.get("modelId", "")} (revision {payload.get("revision", "")}).{fidelity_note}{floor_note}
 </footer>
 <div id="tile-modal" class="tile-modal" hidden>
   <div class="tile-modal-inner">
@@ -1049,10 +1268,14 @@ def _render_html(payload: dict) -> str:
 # --------------------------------------------------------------------------
 
 
-def _ensure_export_basis(aoi: str, index_root: Path | None) -> dict:
-    """Load the S4 export basis, rebuilding it if missing or if its tile
-    order has drifted from the current index (the same staleness check
-    `export_basis.measure_overlap` makes before trusting an export)."""
+def _ensure_export_basis(aoi: str, index_root: Path | None, export_dim: int) -> dict:
+    """Load the S4 export basis at `export_dim`, (re)building it if missing,
+    if its tile order has drifted from the current index (the same
+    staleness check `export_basis.measure_overlap` makes before trusting an
+    export), or if it was built at a different dimension -- the S5c
+    EXPORT_DIM fallback ladder needs a basis actually fit at the dimension
+    being tried, not whatever dimension a previous build happened to leave
+    on disk."""
     manifest_tile_ids = None
     try:
         loaded = export_basis.load_export(aoi, index_root=index_root)
@@ -1061,11 +1284,34 @@ def _ensure_export_basis(aoi: str, index_root: Path | None) -> dict:
     if loaded is not None:
         current = embed_index.load_index(aoi, index_root=index_root)
         manifest_tile_ids = [t["tile_id"] for t in current["manifest"]["tiles"]]
-        if loaded["basis"]["tile_ids"] == manifest_tile_ids:
+        if loaded["basis"]["tile_ids"] == manifest_tile_ids and loaded["basis"]["export_dim"] == export_dim:
             return loaded
-        log.warning("export_html: %s export basis is stale against the current index -- rebuilding", aoi)
-    export_basis.build_export(aoi, index_root=index_root)
+        log.warning(
+            "export_html: %s export basis is stale or at a different export_dim (%s != %d) -- rebuilding",
+            aoi, loaded["basis"].get("export_dim"), export_dim,
+        )
+    export_basis.build_export(aoi, index_root=index_root, export_dim=export_dim)
     return export_basis.load_export(aoi, index_root=index_root)
+
+
+def _measure_export_overlap(
+    aoi: str, index_root: Path | None, export_dim: int, queries: Sequence[str], embedder=None
+) -> dict:
+    """Re-measure retrieval@10 overlap against full precision at whatever
+    `export_dim` the build actually lands on (S5c: figures measured on one
+    AOI must not be quoted for another). Reuses `export_basis.measure_overlap`
+    -- the same F-2a measurement S4 already trusts -- against the basis
+    `_ensure_export_basis` just wrote/loaded for this dimension, rather than
+    a parallel implementation here."""
+    per_scale = export_basis.measure_overlap(aoi, list(queries), index_root=index_root, embedder=embedder)
+    means = [v["mean_overlap"] for v in per_scale.values() if v["mean_overlap"] is not None]
+    overall = float(np.mean(means)) if means else None
+    return {
+        "export_dim": export_dim,
+        "queries": list(queries),
+        "overall_mean_overlap": overall,
+        "per_scale_mean_overlap": {str(k): v["mean_overlap"] for k, v in per_scale.items()},
+    }
 
 
 def _assemble_payload(
@@ -1079,11 +1325,22 @@ def _assemble_payload(
     basemap_max_px: int,
     jpeg_quality: int,
     data_root: Path | None,
+    export_dim: int,
+    overlap_summary: dict,
+    basemap_floor_px: int = 0,
 ) -> tuple[dict, dict]:
     """Build one candidate payload at `basemap_max_px`. Returns (payload,
     component_sizes) -- the caller checks the encoded size and, on the
     resolution ladder, tries the next rung rather than reusing a half-built
-    payload."""
+    payload.
+
+    `basemap_floor_px` is purely informational here (the S5c legibility
+    floor the caller is trying to hold `basemap_max_px` at or above) -- this
+    function does not enforce it, it only records, from the *actual*
+    resulting basemap scale, whether the finest-scale tile ends up rendering
+    at `MIN_RENDERED_TILE_PX` or better, so `_render_html` can state the
+    truth in the footer regardless of which phase of the ladder produced
+    this candidate."""
     sources_out = []
     basemap_bytes_total = 0
     for src in sources:
@@ -1110,6 +1367,19 @@ def _assemble_payload(
     for (category, text), vec_i8 in zip(query_bundle["queries"], query_bundle["vectors_i8"]):
         queries_out.append({"text": text, "category": category, "vectorB64": _b64(vec_i8)})
 
+    # S5c ADDENDUM: rendered px at the *finest* scale, from the worst
+    # (smallest) actual basemap scale among all shipped sources -- computed
+    # from what this candidate actually produced, not from the target
+    # `basemap_floor_px`, so it is honest even in the sub-floor fallback
+    # phase where the target could not be met.
+    finest_scale_px = min(corpus.manifest["scales"]) if corpus.manifest["scales"] else None
+    rendered_finest_px = None
+    if finest_scale_px and sources_out:
+        rendered_finest_px = min(
+            finest_scale_px * min(s["basemapScaleX"], s["basemapScaleY"]) for s in sources_out
+        )
+    basemap_floor_breached = rendered_finest_px is not None and rendered_finest_px < MIN_RENDERED_TILE_PX - 1e-9
+
     payload = {
         "aoi": aoi,
         "modelId": corpus.manifest["model_id"],
@@ -1124,14 +1394,25 @@ def _assemble_payload(
         "perScale": per_scale_out,
         "sources": sources_out,
         "background": {str(k): v for k, v in background.items()},
+        "curatedQueryIndices": curated_query_indices(),
+        "defaultQueryIndex": default_query_index(aoi),
+        "exportDim": export_dim,
+        "overlapSummary": overlap_summary,
+        "minRenderedTilePx": MIN_RENDERED_TILE_PX,
+        "basemapFloorPx": basemap_floor_px,
+        "renderedFinestPx": rendered_finest_px,
+        "basemapFloorBreached": basemap_floor_breached,
     }
     component_sizes = {
-        "tile_vectors_raw_bytes": sum(cols["n"] * export_basis.EXPORT_DIM for cols in per_scale.values()),
+        "tile_vectors_raw_bytes": sum(cols["n"] * export_dim for cols in per_scale.values()),
         "query_vectors_raw_bytes": query_bundle["vectors_i8"].size,
         "basemap_jpeg_bytes": basemap_bytes_total,
         "n_queries": len(queries_out),
         "n_tiles": sum(cols["n"] for cols in per_scale.values()),
         "basemap_max_px": basemap_max_px,
+        "export_dim": export_dim,
+        "rendered_finest_px": rendered_finest_px,
+        "basemap_floor_breached": basemap_floor_breached,
     }
     return payload, component_sizes
 
@@ -1142,63 +1423,147 @@ def build_export_html(
     data_root: Path | None = None,
     embedder=None,
     basemap_ladder: Sequence[int] = BASEMAP_RESOLUTION_LADDER,
+    dim_ladder: Sequence[int] = EXPORT_DIM_LADDER,
+    overlap_queries: Sequence[str] = OVERLAP_MEASURE_QUERIES,
     jpeg_quality: int = DEFAULT_JPEG_QUALITY,
     max_bytes: int = EXPORT_SIZE_CAP_BYTES,
     out_path: Path | None = None,
 ) -> dict:
     """Build the standalone export for one AOI (F-8). Degrades basemap
-    resolution (never tile count or vector precision) until the assembled
-    file fits `max_bytes`; raises `ExportSizeError` naming the computed size
-    and tile count if even the smallest rung does not (N-6). Nothing is
-    written to disk unless the final size is within the cap.
+    resolution first (never tile count), and only once the *whole*
+    `basemap_ladder` has been exhausted at one `EXPORT_DIM` does it step
+    down to the next dimension in `dim_ladder` and retry the full basemap
+    ladder there (S5c defect 2: an AOI whose vectors alone exceed the cap
+    -- `leb`'s two-dates-over-one-footprint 41,888 tiles at 384-d int8 --
+    cannot be saved by basemap reduction, since the basemap contributes zero
+    bytes in that failure). Raises `ExportSizeError` naming the computed
+    size, the tile count, and the smallest configuration tried if even that
+    does not fit (N-6). Nothing is written to disk unless the final size is
+    within the cap.
     """
     corpus = retrieve.load_corpus(aoi, index_root=index_root, data_root=data_root)
-    loaded_export = _ensure_export_basis(aoi, index_root)
-    if loaded_export["basis"]["tile_ids"] != [t["tile_id"] for t in corpus.manifest["tiles"]]:
-        raise RuntimeError(f"{aoi}: export basis tile order does not match the loaded corpus after rebuild")
-
     emb = embedder
-    query_bundle = build_query_vectors(loaded_export["components"], embedder=emb)
-    exported_f32 = export_basis.exported_vectors_f32(loaded_export)
-    background = _build_export_background(corpus, exported_f32, loaded_export["components"], embedder=emb)
-    sources, per_scale = _build_sources_and_tiles(corpus, loaded_export["vectors_i8"])
+
+    # S5c ADDENDUM: the basemap floor is pure geometry (source raster width,
+    # finest tile scale) -- independent of EXPORT_DIM -- so it is computed
+    # once, before the dim loop, not re-derived per rung.
+    all_sources = _unique_source_files(corpus)
+    finest_scale_px = min(corpus.manifest["scales"]) if corpus.manifest["scales"] else 0
+    basemap_floor_px = _basemap_floor_px(all_sources, data_root, finest_scale_px)
 
     last_size = None
     last_component_sizes = None
-    for basemap_max_px in basemap_ladder:
+    last_export_dim = None
+    last_basemap_px = None
+
+    def _try_build(export_dim, loaded_export, query_bundle, background, sources, per_scale, overlap_summary, basemap_max_px):
         payload, component_sizes = _assemble_payload(
             aoi, corpus, loaded_export, query_bundle, background, sources, per_scale,
-            basemap_max_px, jpeg_quality, data_root,
+            basemap_max_px, jpeg_quality, data_root, export_dim, overlap_summary,
+            basemap_floor_px=basemap_floor_px,
         )
         html = _render_html(payload)
         html_bytes = html.encode("utf-8")
         size = len(html_bytes)
-        last_size, last_component_sizes = size, component_sizes
         log.info(
-            "export_html: %s at basemap_max_px=%d -> %.2f MB (cap %.0f MB)",
-            aoi, basemap_max_px, size / 1e6, max_bytes / 1e6,
+            "export_html: %s at export_dim=%d, basemap_max_px=%d -> %.2f MB (cap %.0f MB)%s",
+            aoi, export_dim, basemap_max_px, size / 1e6, max_bytes / 1e6,
+            " [below legibility floor]" if component_sizes["basemap_floor_breached"] else "",
         )
-        if size <= max_bytes:
-            path = out_path or export_html_path(aoi, index_root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(path.name + ".tmp")
-            tmp.write_bytes(html_bytes)
-            os.replace(tmp, path)
-            return {
-                "aoi": aoi,
-                "out_path": str(path),
-                "size_bytes": size,
-                "basemap_max_px": basemap_max_px,
-                "n_tiles": component_sizes["n_tiles"],
-                "n_queries": component_sizes["n_queries"],
-                "component_sizes": component_sizes,
-            }
+        return html_bytes, size, component_sizes
+
+    def _write(path_, html_bytes):
+        path_.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path_.with_name(path_.name + ".tmp")
+        tmp.write_bytes(html_bytes)
+        os.replace(tmp, path_)
+
+    def _report(path_, size, export_dim, basemap_max_px, overlap_summary, component_sizes):
+        return {
+            "aoi": aoi,
+            "out_path": str(path_),
+            "size_bytes": size,
+            "basemap_max_px": basemap_max_px,
+            "basemap_floor_px": basemap_floor_px,
+            "basemap_floor_breached": component_sizes["basemap_floor_breached"],
+            "rendered_finest_px": component_sizes["rendered_finest_px"],
+            "export_dim": export_dim,
+            "overlap": overlap_summary,
+            "n_tiles": component_sizes["n_tiles"],
+            "n_queries": component_sizes["n_queries"],
+            "component_sizes": component_sizes,
+        }
+
+    # Per-dim state, kept for the sub-floor fallback phase below (which
+    # reuses the *smallest* dim's already-loaded basis/queries/background
+    # rather than recomputing them).
+    smallest_dim_state = None
+
+    # ---- Phase 1: hold the basemap at or above the legibility floor, and
+    # step EXPORT_DIM down to fund it (S5c ADDENDUM's corrected ladder
+    # order -- basemap quality is never sacrificed below the floor to
+    # protect a fidelity number nobody can see).
+    for export_dim in dim_ladder:
+        loaded_export = _ensure_export_basis(aoi, index_root, export_dim)
+        if loaded_export["basis"]["tile_ids"] != [t["tile_id"] for t in corpus.manifest["tiles"]]:
+            raise RuntimeError(f"{aoi}: export basis tile order does not match the loaded corpus after rebuild")
+
+        query_bundle = build_query_vectors(loaded_export["components"], embedder=emb)
+        exported_f32 = export_basis.exported_vectors_f32(loaded_export)
+        background = _build_export_background(corpus, exported_f32, loaded_export["components"], embedder=emb)
+        sources, per_scale = _build_sources_and_tiles(corpus, loaded_export["vectors_i8"])
+        overlap_summary = _measure_export_overlap(aoi, index_root, export_dim, overlap_queries, embedder=emb)
+        smallest_dim_state = (loaded_export, query_bundle, background, sources, per_scale, overlap_summary)
+
+        # Filter, never insert below-ladder rungs: if the *smallest*
+        # predefined rung already clears the floor (the common case -- most
+        # AOIs' floor sits well under 512px), behaviour is byte-identical to
+        # the pre-ADDENDUM ladder. Only when the floor sits *above* every
+        # predefined rung (leb: floor ~4318px, ladder tops out at 4096) is
+        # the floor itself added as the sole viable candidate -- extending
+        # the ladder upward to meet the floor, never inventing a smaller
+        # option the floor didn't require.
+        rungs_at_or_above_floor = sorted({p for p in basemap_ladder if p >= basemap_floor_px}, reverse=True)
+        if not rungs_at_or_above_floor and basemap_floor_px > 0:
+            rungs_at_or_above_floor = [basemap_floor_px]
+        for basemap_max_px in rungs_at_or_above_floor:
+            html_bytes, size, component_sizes = _try_build(
+                export_dim, loaded_export, query_bundle, background, sources, per_scale, overlap_summary, basemap_max_px,
+            )
+            last_size, last_component_sizes = size, component_sizes
+            last_export_dim, last_basemap_px = export_dim, basemap_max_px
+            if size <= max_bytes:
+                path = out_path or export_html_path(aoi, index_root)
+                _write(path, html_bytes)
+                return _report(path, size, export_dim, basemap_max_px, overlap_summary, component_sizes)
+
+    # ---- Phase 2: every EXPORT_DIM was tried with the basemap held at or
+    # above the floor and none fit. Only now may the basemap drop below the
+    # floor (brief: "Only if the smallest dimension still will not fit may
+    # the basemap go below the floor -- and then the footer must say so
+    # explicitly"), at the smallest EXPORT_DIM already loaded above, trying
+    # the remaining (sub-floor) rungs largest-first as before.
+    if smallest_dim_state is not None and basemap_floor_px > 0:
+        export_dim = dim_ladder[-1]
+        loaded_export, query_bundle, background, sources, per_scale, overlap_summary = smallest_dim_state
+        sub_floor_rungs = sorted({p for p in basemap_ladder if p < basemap_floor_px}, reverse=True)
+        for basemap_max_px in sub_floor_rungs:
+            html_bytes, size, component_sizes = _try_build(
+                export_dim, loaded_export, query_bundle, background, sources, per_scale, overlap_summary, basemap_max_px,
+            )
+            last_size, last_component_sizes = size, component_sizes
+            last_export_dim, last_basemap_px = export_dim, basemap_max_px
+            if size <= max_bytes:
+                path = out_path or export_html_path(aoi, index_root)
+                _write(path, html_bytes)
+                return _report(path, size, export_dim, basemap_max_px, overlap_summary, component_sizes)
 
     n_tiles = last_component_sizes["n_tiles"] if last_component_sizes else 0
     raise ExportSizeError(
         f"{aoi}: export does not fit under the {max_bytes} byte cap even at the smallest "
-        f"tried basemap resolution ({basemap_ladder[-1]} px): computed size = {last_size} bytes "
-        f"({last_size / 1e6:.2f} MB) for {n_tiles} tiles. Nothing was written."
+        f"tried configuration (export_dim={last_export_dim}, basemap={last_basemap_px} px): "
+        f"computed size = {last_size} bytes ({last_size / 1e6:.2f} MB) for {n_tiles} tiles. "
+        f"Nothing was written."
     )
 
 

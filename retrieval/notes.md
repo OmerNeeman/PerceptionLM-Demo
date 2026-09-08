@@ -1478,3 +1478,94 @@ artifact is evidence about your pattern before it is evidence about the file.**
 52 damage. The owner's named vocabulary is present in article form (`a dirt
 road`, `a collapsed roof`); type-to-filter is substring-based so the bare nouns
 reach them.
+
+---
+
+## s5c — 2026-09-08 — the export was unusable, and the budget ladder optimised the wrong thing
+
+Two owner-reported defects. The second produced the most transferable lesson in
+the project so far.
+
+### Defect 1 — it opened as a wall of text
+
+The export rendered **226 query chips in four long lists and nothing else** — no
+tiles, no basemap, no imagery at all, then a large empty page. A stranger could
+not tell it was an image-search tool. Owner's words: *"looks bad"*.
+
+It satisfied U-1's letter (examples visible and clickable) and failed its intent
+(*opens in a working state*).
+
+**How this shipped:** the PM verified the artifact's **contents** — 10.13 MB,
+zero external refs, caveat present, ranking parity 1.000 — and **never rendered
+it**. S5b's agent died before producing a screenshot, and the PM sent the file to
+the owner without looking at it. Every fact checked was true and the page was
+still unusable.
+
+> **Checking that the right bytes are present is not checking that the artifact
+> works.** Render it and look. This is now standard for any visual deliverable.
+
+*Fixed:* a default query runs on load so tiles are on screen before any click;
+~10 curated chips replace the 226 (filter box and a "show all" toggle reach the
+rest); thumbnails enlarged 96 -> 150 px.
+
+### Defect 2 — `leb` starved its own imagery to protect a number
+
+`leb` first failed the cap outright — **22.91 MB for 41,888 tiles** — which was
+N-6 behaving correctly. `leb` is two dates over one footprint, so at 384-d int8
+the **vectors alone are 16.1 MB**, over budget before a single pixel of basemap.
+
+Adding `EXPORT_DIM` to the fallback ladder made it build. It was still unusable:
+
+| | X605_Y3388 | leb (first attempt) |
+|---|---|---|
+| basemap | 4096², 3.95 MB | 1280x621, **0.28 MB** x2 |
+| scale | 0.400 | **0.063** |
+| 112 px tile renders as | 45 px | **7 px** |
+| vectors | 3.70 MB | **10.7 MB** |
+
+**10.7 MB of vectors against 0.59 MB of imagery** — in a file whose only purpose
+is to be looked at. Seven real pixels upscaled to a 150 px card.
+
+**The PM's brief caused this.** It said "if it does not fit, reduce basemap
+resolution first — it degrades gracefully." True for `X605_Y3388`, where basemap
+reduction alone sufficed. Catastrophic for `leb`, where it protected a fidelity
+metric by destroying the thing a human actually sees.
+
+> **Corrected principle, now in the exporter: legibility has a floor, fidelity
+> does not.** A retrieval@10 overlap of 0.77 against 0.69 is invisible to a
+> person; a 7 px thumbnail against a 24 px one decides whether the file is worth
+> opening. The ladder now holds the basemap so the finest-scale tile renders at
+> **>= 24 px**, and steps `EXPORT_DIM` down to fund it.
+
+### Result — both verified by the PM, not taken from the handback
+
+| | X605_Y3388 | leb |
+|---|---|---|
+| size | 10.13 MiB | 14.93 MiB |
+| `EXPORT_DIM` | 384 | **128** (bottom of ladder) |
+| basemap scale | 0.400 | 0.214 |
+| finest tile renders at | 45 px | 24 px (floor exactly) |
+| overlap vs full precision | **0.848** | **0.693** |
+| external refs | 0 | 0 |
+| **ranking parity vs local** | **1.000** | **1.000** |
+
+`leb` at 0.693 is the least faithful artifact shipped, and it is stated in the
+file's own footer rather than only in this log. The trade was made deliberately
+and the owner was told the number.
+
+### A correction the PM owes itself
+
+The PM rejected splitting `leb` by date on the grounds that it would "destroy
+the comparison". That reasoning was poor. **One date is 20,944 tiles, which fits
+384-d *and* a full-resolution basemap in ~10.5 MB** — two files would deliver
+both better fidelity *and* sharper imagery, at the cost of comparing dates
+across two browser tabs rather than a dropdown. Offered to the owner as the
+better artifact if the destruction pair is something they intend to show people.
+
+### Method note
+
+Two false alarms while reading the payload, both the PM's own decoding errors
+rather than defects: the caveat is HTML-entity encoded (`&ndash;`), and the
+packed arrays use **mixed widths** — `int8` for source index, `int16` for pixel
+offsets. A negative result about an artifact is evidence about your reader
+before it is evidence about the file.

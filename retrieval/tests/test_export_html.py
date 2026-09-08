@@ -50,8 +50,33 @@ import retrieve
 import tiling
 
 DEMO_AOI = "X605_Y3388"
+LEB_AOI = "leb"
 
 NODE = shutil.which("node") or shutil.which("nodejs")
+CHROME = (
+    shutil.which("google-chrome")
+    or shutil.which("google-chrome-stable")
+    or shutil.which("chromium")
+    or shutil.which("chromium-browser")
+)
+
+
+def _dump_dom(path: Path, timeout: int = 60) -> str:
+    """Render the export in headless Chrome and return the *live* DOM after
+    its JS has run (`--dump-dom`). Results and chips are painted by
+    client-side JS, not present in the static markup `_render_html` emits,
+    so this is the only way to check what actually renders at rest -- the
+    property S5c defect 1 is about ("opens as a wall of chips and nothing
+    else")."""
+    proc = subprocess.run(
+        [
+            CHROME, "--headless=new", "--disable-gpu", "--no-sandbox",
+            "--virtual-time-budget=15000", "--dump-dom", f"file://{path.resolve()}",
+        ],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    assert proc.returncode == 0, f"chrome --dump-dom failed: {proc.stderr}"
+    return proc.stdout
 
 
 # --------------------------------------------------------------------------
@@ -105,6 +130,17 @@ def production_export(real_embedder):
     """Builds the real deliverable against the real X605_Y3388 index -- see
     module docstring for why this is not the tmp_path-only rule's target."""
     report = export_html.build_export_html(DEMO_AOI, embedder=real_embedder)
+    return report
+
+
+@pytest.fixture(scope="module")
+def production_export_leb(real_embedder):
+    """Builds the real deliverable against the real `leb` index -- S5c
+    defect 2. `leb` is two dates over one footprint, 41,888 tiles; at
+    EXPORT_DIM 384 the int8 vectors alone are 16.1 MB, over the cap before
+    any basemap exists, so this exercises the EXPORT_DIM fallback ladder
+    for real rather than only on a synthetic fixture."""
+    report = export_html.build_export_html(LEB_AOI, embedder=real_embedder)
     return report
 
 
@@ -182,6 +218,183 @@ def test_export_size_fails_loudly(synthetic_export, tmp_path):
     assert str(n_tiles_expected) in msg, f"expected tile count {n_tiles_expected} named in: {msg}"
     assert not out_path.exists(), "a truncated/partial file was written despite the size failure"
     assert not out_path.parent.exists() or not any(out_path.parent.iterdir())
+
+
+# --------------------------------------------------------------------------
+# S5c defect 2 -- EXPORT_DIM fallback ladder. Basemap reduction alone
+# cannot save an AOI whose vectors already exceed the cap before any
+# basemap exists; N-6 must still raise when even the smallest (dim,
+# basemap) combination does not fit (covered above, unchanged).
+# --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# S5c ADDENDUM -- "legibility has a floor; fidelity does not." The dim
+# fallback (above) can starve the basemap to protect a fidelity number
+# nobody looks at; these tests are the regression guard for the reordered
+# ladder that funds the basemap floor by stepping EXPORT_DIM down first.
+# --------------------------------------------------------------------------
+
+
+def test_basemap_scale_floor(synthetic_export):
+    """The finest-scale tile must render at >= MIN_RENDERED_TILE_PX real
+    basemap pixels, or the shipped payload/footer must say the floor was
+    breached and why (never a silent shortfall)."""
+    path = Path(synthetic_export["report"]["out_path"])
+    data = export_html.read_export_data(path)
+    rendered = data["renderedFinestPx"]
+    assert rendered is not None
+    if data["basemapFloorBreached"]:
+        assert rendered < export_html.MIN_RENDERED_TILE_PX
+        html_text = path.read_text(encoding="utf-8")
+        lowered = html_text.lower()
+        assert "legibility floor" in lowered or "basemap resolution notice" in lowered, (
+            "floor breached but the footer does not explain it"
+        )
+    else:
+        assert rendered >= export_html.MIN_RENDERED_TILE_PX - 1e-6, (
+            f"finest-scale tile renders at {rendered:.2f}px, below the "
+            f"{export_html.MIN_RENDERED_TILE_PX}px floor, with no footer explanation"
+        )
+    # the report returned in memory must agree with what was written to disk
+    report = synthetic_export["report"]
+    assert report["rendered_finest_px"] == pytest.approx(rendered, abs=1e-6)
+    assert report["basemap_floor_breached"] == data["basemapFloorBreached"]
+
+
+def test_x605_unaffected_by_basemap_floor(production_export):
+    """X605_Y3388 already sits at scale 0.400 (well above the floor) and
+    fits at EXPORT_DIM 384 -- the ADDENDUM must not touch it: same dim, same
+    top-of-ladder basemap resolution as before the floor was introduced."""
+    report = production_export
+    assert report["export_dim"] == export_html.EXPORT_DIM_LADDER[0]
+    assert report["basemap_max_px"] == export_html.BASEMAP_RESOLUTION_LADDER[0]
+    assert not report["basemap_floor_breached"]
+    assert report["rendered_finest_px"] >= export_html.MIN_RENDERED_TILE_PX
+
+
+def test_leb_basemap_meets_legibility_floor(production_export_leb):
+    """The regression test for the actual bug: leb's 112px tiles shipped
+    from 7 real px (scale 0.063) before this fix -- unreadable, rubble
+    indistinguishable from an intact roof. The reordered ladder must fund a
+    basemap that clears MIN_RENDERED_TILE_PX by stepping EXPORT_DIM down
+    first, not by starving the basemap."""
+    report = production_export_leb
+    assert report["rendered_finest_px"] >= export_html.MIN_RENDERED_TILE_PX - 1e-6, (
+        f"leb's finest-scale tiles render at {report['rendered_finest_px']:.2f}px, "
+        f"still below the {export_html.MIN_RENDERED_TILE_PX}px floor"
+    )
+    assert not report["basemap_floor_breached"]
+
+    path = Path(report["out_path"])
+    data = export_html.read_export_data(path)
+    assert len(data["sources"]) == 2, "both leb dates must each carry a basemap that meets the floor"
+    for src in data["sources"]:
+        finest = min(data["scales"])
+        rendered = finest * min(src["basemapScaleX"], src["basemapScaleY"])
+        assert rendered >= export_html.MIN_RENDERED_TILE_PX - 1e-6, (
+            f"{src['relPath']} ({src['date']}): finest tile renders at {rendered:.2f}px"
+        )
+
+
+def test_export_dim_fallback(real_embedder, tmp_path):
+    """An AOI that cannot fit at EXPORT_DIM 384 (even at the smallest
+    basemap) steps down the dimension ladder and the report records which
+    dimension was actually used; an AOI that already fits at 384 is
+    unaffected -- it must not be downgraded just because a smaller
+    dimension also exists in the ladder. Isolated tmp_path index/out_path so
+    this cannot mutate the shared `synthetic_export` fixture other tests
+    depend on."""
+    data_root = tmp_path / "data"
+    index_root = tmp_path / "index"
+    data_root.mkdir()
+    index_root.mkdir()
+    rel = "dim_fallback_scene.tif"
+    _make_fixture_raster(data_root / rel, size=896, seed=11)
+    aoi = "dim_fallback_scene"
+    embed_index.build_index(
+        rel, scales=(448, 224, 112), batch_size=32,
+        data_root=data_root, index_root=index_root, embedder=real_embedder,
+    )
+
+    unaffected = export_html.build_export_html(
+        aoi, index_root=index_root, data_root=data_root, embedder=real_embedder,
+        out_path=tmp_path / "unaffected.html",
+    )
+    assert unaffected["export_dim"] == export_html.EXPORT_DIM_LADDER[0], (
+        "an AOI that already fits at the top of the dim ladder must not be downgraded: "
+        f"got export_dim={unaffected['export_dim']}"
+    )
+
+    forced = export_html.build_export_html(
+        aoi, index_root=index_root, data_root=data_root, embedder=real_embedder,
+        out_path=tmp_path / "forced.html", max_bytes=350_000,
+    )
+    assert forced["export_dim"] in export_html.EXPORT_DIM_LADDER
+    assert forced["export_dim"] < export_html.EXPORT_DIM_LADDER[0], (
+        f"expected a step down from {export_html.EXPORT_DIM_LADDER[0]}, got {forced['export_dim']}"
+    )
+    forced_path = Path(forced["out_path"])
+    assert forced_path.stat().st_size <= 350_000
+    data = export_html.read_export_data(forced_path)  # fresh read from disk
+    assert data["exportDim"] == forced["export_dim"], "the shipped file must name the dimension actually used"
+
+
+def test_leb_export_builds_under_cap(production_export_leb):
+    """The real `leb` AOI -- two dates, 41,888 tiles, 16.1 MB of vectors
+    alone at 384-d -- must build under the cap via the dim fallback, and
+    both dates must survive in the one file (splitting them destroys the
+    2022->2025 destruction comparison that is leb's whole value)."""
+    report = production_export_leb
+    path = Path(report["out_path"])
+    assert path.is_file()
+    size = path.stat().st_size  # measured on disk, not the builder's return
+    assert size == report["size_bytes"]
+    assert size <= export_html.EXPORT_SIZE_CAP_BYTES, (
+        f"{path}: {size} bytes exceeds the {export_html.EXPORT_SIZE_CAP_BYTES} byte cap"
+    )
+    assert report["export_dim"] < export_html.EXPORT_DIM_LADDER[0], (
+        "leb is known to exceed the cap at EXPORT_DIM 384 -- the fallback must have stepped down"
+    )
+
+    data = export_html.read_export_data(path)  # fresh read from disk
+    dates = sorted({s["date"] for s in data["sources"]})
+    assert dates == ["2022-10-29", "2025-06-06"], f"expected both leb dates in one file, got {dates}"
+    assert len(data["sources"]) == 2, "expected exactly one basemap per date"
+
+
+# --------------------------------------------------------------------------
+# S5c defect 1 -- opens as a wall of chips and nothing else. U-1's intent,
+# not only its letter: results must be visible at rest, not only after a
+# click, and the landing chip count must be bounded (the filter box still
+# reaches the full precomputed set).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(CHROME is None, reason="a headless Chrome/Chromium binary is required to render the export")
+def test_export_opens_with_results(synthetic_export):
+    path = Path(synthetic_export["report"]["out_path"])
+    dom = _dump_dom(path)
+    assert 'class="result-card"' in dom, "no rendered result cards at rest -- the default query did not run on load"
+    assert 'class="scale-row"' in dom, "no rendered scale-row section at rest"
+    assert 'class="example-badge"' in dom, "the auto-run query must be labelled as an example, not a user search"
+    # the empty placeholder from before the fix must be gone
+    assert '<div id="results"></div>' not in dom
+
+
+def test_export_chip_count_is_curated(synthetic_export):
+    assert len(export_html.CURATED_QUERIES) <= 20
+    full_texts = set(export_html.precomputed_query_texts())
+    assert set(export_html.CURATED_QUERIES) <= full_texts, "curated queries must be a subset of the precomputed set"
+    assert len(set(export_html.CURATED_QUERIES)) == len(export_html.CURATED_QUERIES), "duplicate curated query"
+
+    path = Path(synthetic_export["report"]["out_path"])
+    data = export_html.read_export_data(path)  # fresh read from disk
+    assert len(data["curatedQueryIndices"]) == len(export_html.CURATED_QUERIES)
+    assert len(data["curatedQueryIndices"]) <= 20
+    # the full set is still shipped and reachable via the filter box / show-all
+    # toggle -- only the *default* rendering is curated, not the data.
+    assert len(data["queries"]) == len(export_html.PRECOMPUTED_QUERIES)
 
 
 # --------------------------------------------------------------------------
