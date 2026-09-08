@@ -48,6 +48,7 @@ from __future__ import annotations
 import dataclasses
 import html as html_lib
 import io
+import json
 import logging
 import threading
 import time
@@ -123,6 +124,11 @@ CROSS_ROW_CAVEAT = "Scores are only meaningful within one scale's row — never 
 
 DEMO_AOI = "X605_Y3388"
 
+#: Part 3 (brief S6) -- the AOI-selector sentinel meaning "search every
+#: indexed AOI at once", never a real AOI name (`embed_index.list_indexed_aois`
+#: only ever returns real ones, so this can never collide with one).
+ALL_AOIS = "all"
+
 MAX_QUERY_CHARS = 2000  # generous; the 500-char abuse case is well inside this
 MAX_THUMB_PX = 512
 MIN_THUMB_PX = 16
@@ -175,25 +181,121 @@ class Engine:
     """
 
     def __init__(self, aoi: str = DEMO_AOI, index_root: Path | None = None, data_root: Path | None = None):
+        """`aoi` is the *default* selected AOI (Part 3: "defaulting to one
+        AOI rather than everything, so results stay interpretable") -- not
+        the only one this Engine can serve. Every AOI with a complete
+        on-disk index under `index_root` (`embed_index.list_indexed_aois`) is
+        discovered and its corpus/background loaded eagerly here, alongside
+        `aoi` itself if for some reason it is not otherwise discovered (e.g.
+        a fixture index that predates `list_indexed_aois`, or `aoi` was
+        renamed on disk) -- this keeps the pre-S6 single-AOI call signature
+        (`Engine(aoi=..., index_root=..., data_root=...)`) working unchanged
+        for a single-AOI index, since discovery then finds exactly that one
+        AOI and every existing caller/test still gets the same behaviour.
+        F-5's < 5 s budget covers this whole eager load, not just one AOI's
+        (measured on the real 4-AOI production index: well under a second
+        total -- see briefs/S6_result.md).
+        """
         self.aoi = aoi
         self.index_root = index_root
         self.data_root = data_root
         self._lock = threading.Lock()
-        self.corpus: retrieve.Corpus = retrieve.load_corpus(aoi, index_root=index_root, data_root=data_root)
-        try:
-            self.background: dict[int, Sequence[float]] | None = retrieve.load_background(
-                aoi, index_root=index_root
-            )["scores_by_scale"]
-        except FileNotFoundError:
-            log.warning("app: no background reference set found for %s -- confidence bands will read 'unknown'", aoi)
-            self.background = None
-        self.embedder = None  # lazy -- see class docstring
-        self._available_dates: list[str] = sorted(
-            {loc["date"] for loc in self.corpus.locations.values() if loc["date"] != "unknown"}
-        )
 
-    def available_dates(self) -> list[str]:
-        return list(self._available_dates)
+        discovered = embed_index.list_indexed_aois(index_root)
+        self.available_aois: list[str] = sorted(set(discovered) | {aoi})
+
+        self._corpora: dict[str, retrieve.Corpus] = {}
+        self._backgrounds: dict[str, dict[int, Sequence[float]] | None] = {}
+        for a in self.available_aois:
+            self._corpora[a] = retrieve.load_corpus(a, index_root=index_root, data_root=data_root)
+            try:
+                self._backgrounds[a] = retrieve.load_background(a, index_root=index_root)["scores_by_scale"]
+            except FileNotFoundError:
+                log.warning(
+                    "app: no background reference set found for %s -- confidence bands will read 'unknown'", a
+                )
+                self._backgrounds[a] = None
+
+        # Kept as plain attributes (not methods) for backward compatibility --
+        # every pre-S6 caller/test reads `engine.corpus` / `engine.background`
+        # directly, meaning "the default AOI's corpus/background". They are
+        # fixed at construction time, never mutated by a later per-query `aoi`
+        # argument (concurrent requests may select different AOIs; Engine
+        # itself carries no "currently selected AOI" mutable state).
+        self.corpus: retrieve.Corpus = self._corpora[aoi]
+        self.background: dict[int, Sequence[float]] | None = self._backgrounds[aoi]
+
+        self._all_corpus: retrieve.Corpus | None = None  # built lazily -- see get_corpus
+        self.embedder = None  # lazy -- see class docstring
+        self._available_dates_by_aoi: dict[str, list[str]] = {
+            a: sorted({loc["date"] for loc in c.locations.values() if loc["date"] != "unknown"})
+            for a, c in self._corpora.items()
+        }
+
+    def get_corpus(self, aoi: str | None) -> retrieve.Corpus:
+        """The corpus for one selected AOI, or the `ALL_AOIS` sentinel for
+        every indexed AOI concatenated (Part 3). The combined corpus is built
+        once, lazily, and cached -- most sessions never ask for it, and
+        building it eagerly for every Engine would spend F-5's budget on a
+        view most queries do not use."""
+        aoi = aoi or self.aoi
+        if aoi == ALL_AOIS:
+            if self._all_corpus is None:
+                with self._lock:
+                    if self._all_corpus is None:
+                        self._all_corpus = retrieve.load_corpus_multi(
+                            self.available_aois, index_root=self.index_root, data_root=self.data_root
+                        )
+            return self._all_corpus
+        if aoi not in self._corpora:
+            raise ValueError(
+                f"unknown AOI {aoi!r} -- available: {self.available_aois + [ALL_AOIS]}"
+            )
+        return self._corpora[aoi]
+
+    def get_background(self, aoi: str | None) -> dict[int, Sequence[float]] | None:
+        """Confidence-band background for one selected AOI. `ALL_AOIS` has no
+        combined background reference set (unspecified by the brief; building
+        one would need its own calibration, not just a concatenation) --
+        `retrieve.confidence_band` already handles `None` by reporting
+        `band: "unknown"` rather than raising, so this is an honest omission,
+        not a broken path."""
+        aoi = aoi or self.aoi
+        if aoi == ALL_AOIS:
+            return None
+        return self._backgrounds.get(aoi)
+
+    def available_dates(self, aoi: str | None = None) -> list[str]:
+        aoi = aoi or self.aoi
+        if aoi == ALL_AOIS:
+            combined: set[str] = set()
+            for dates in self._available_dates_by_aoi.values():
+                combined |= set(dates)
+            return sorted(combined)
+        return list(self._available_dates_by_aoi.get(aoi, []))
+
+    def ground_extent_note(self) -> str | None:
+        """Part 3: "note in the UI that a 448 px tile is 46.91 m in leb and
+        44.80 m in the UTM scenes" -- computed from each loaded AOI's own
+        `ground_extent_m` (itself sourced from `geo.py`, never hardcoded
+        here), not typed as a literal. Returns None when every indexed AOI
+        happens to share the same true GSD (e.g. a single-AOI fixture index),
+        since there is then nothing to caveat."""
+        scale = tiling.SCALES[0]
+        extents = {a: c.ground_extent_m.get(scale) for a, c in self._corpora.items()}
+        distinct = sorted({round(v, 2) for v in extents.values() if v is not None})
+        if len(distinct) <= 1:
+            return None
+        lo, hi = distinct[0], distinct[-1]
+        pct = (hi - lo) / lo * 100.0
+        lo_aois = sorted(a for a, v in extents.items() if v is not None and round(v, 2) == lo)
+        hi_aois = sorted(a for a, v in extents.items() if v is not None and round(v, 2) == hi)
+        return (
+            f"A {scale}px tile is {lo:.2f} m across in {', '.join(lo_aois)} and "
+            f"{hi:.2f} m in {', '.join(hi_aois)} ({pct:.1f}% difference) — cross-AOI "
+            f"ranking is still valid (one embedder, one embedding space), but tile "
+            f"footprints are not identical ground area."
+        )
 
     def get_embedder(self) -> tuple[object, bool, float]:
         """Returns (embedder, was_just_loaded, load_ms). Thread-safe,
@@ -210,24 +312,30 @@ class Engine:
             log.info("app: embedder loaded in %.1f ms", load_ms)
             return self.embedder, True, load_ms
 
-    def run_query(self, text: str, *, bbox=None, date=None, top_k: int = retrieve.TOP_K) -> dict:
+    def run_query(
+        self, text: str, *, aoi: str | None = None, bbox=None, date=None, top_k: int = retrieve.TOP_K
+    ) -> dict:
         with self._lock:
             embedder, warm_up, model_load_ms = (self.embedder, False, 0.0)
         if embedder is None:
             embedder, warm_up, model_load_ms = self.get_embedder()
 
-        corpus = filter_corpus_by_date(self.corpus, date)
+        selected_aoi = aoi or self.aoi
+        base_corpus = self.get_corpus(selected_aoi)  # raises ValueError on an unknown AOI -- never silently ignored
+        corpus = filter_corpus_by_date(base_corpus, date)
+        background = self.get_background(selected_aoi)
         t0 = time.perf_counter()
         with self._lock:
             qvec = retrieve.embed_query(text, embedder=embedder)
         embed_ms = (time.perf_counter() - t0) * 1000.0
 
         t1 = time.perf_counter()
-        out = retrieve.rank_per_scale(corpus, qvec, top_k=top_k, bbox=bbox, background=self.background)
+        out = retrieve.rank_per_scale(corpus, qvec, top_k=top_k, bbox=bbox, background=background)
         search_ms = (time.perf_counter() - t1) * 1000.0
 
         return {
             "query": text,
+            "aoi": selected_aoi,
             "rankings": out["rankings"],
             "timing": {
                 "model_load_ms": round(model_load_ms, 1),
@@ -293,22 +401,31 @@ def enrich_result(res: dict) -> dict:
     }
 
 
-def answer_query(engine: Engine, text: str, *, bbox=None, date=None, top_k: int = retrieve.TOP_K) -> dict:
+def answer_query(
+    engine: Engine, text: str, *, aoi: str | None = None, bbox=None, date=None, top_k: int = retrieve.TOP_K
+) -> dict:
     """The full app-level answer to one query: validated empty/whitespace
     handling, then `Engine.run_query`, then display enrichment. Never raises
     on an empty/whitespace query -- returns a guidance response instead
-    (mirrors U-3's "empty state guides" spirit for the query box itself)."""
+    (mirrors U-3's "empty state guides" spirit for the query box itself).
+
+    `aoi` (Part 3): `None` means the engine's own default AOI; a real AOI
+    name restricts candidates to it; `ALL_AOIS` spans every indexed AOI.
+    An unknown AOI name still raises (via `Engine.get_corpus`) rather than
+    silently falling back to the default -- a filter that silently does
+    nothing is worse than one that fails loudly."""
     stripped = text.strip()
     if not stripped:
         return {
             "query": text,
+            "aoi": aoi or engine.aoi,
             "empty": True,
             "message": "Type a description, or click one of the examples above.",
             "rankings": {},
             "timing": {"model_load_ms": 0.0, "embed_ms": 0.0, "search_ms": 0.0, "total_ms": 0.0, "warm_up": False},
         }
     truncated = stripped[:MAX_QUERY_CHARS]
-    out = engine.run_query(truncated, bbox=bbox, date=date, top_k=top_k)
+    out = engine.run_query(truncated, aoi=aoi, bbox=bbox, date=date, top_k=top_k)
     rankings = {}
     for scale, ranking in out["rankings"].items():
         rankings[scale] = {
@@ -375,10 +492,39 @@ def _example_chips_html() -> str:
 
 
 def render_index_html(engine: Engine | None = None) -> str:
-    dates = engine.available_dates() if engine is not None else []
+    default_aoi = engine.aoi if engine is not None else DEMO_AOI
+    available_aois = engine.available_aois if engine is not None else [default_aoi]
+    dates = engine.available_dates(default_aoi) if engine is not None else []
     date_options = "".join(f'<option value="{html_lib.escape(d)}">{html_lib.escape(d)}</option>' for d in dates)
     date_disabled = "" if dates else "disabled"
-    date_note = "" if dates else "<p class=\"muted small\">No dated imagery indexed for this AOI.</p>"
+    date_note = "" if dates else "No dated imagery indexed for this AOI."
+
+    # Part 3: single-AOI default, explicit "all AOIs" option -- never opens
+    # already spanning everything (that would make results uninterpretable).
+    aoi_options = "".join(
+        f'<option value="{html_lib.escape(a)}"{" selected" if a == default_aoi else ""}>{html_lib.escape(a)}</option>'
+        for a in available_aois
+    )
+    aoi_options += f'<option value="{ALL_AOIS}">All AOIs</option>'
+
+    # Per-AOI available dates, so the date <select> can be repopulated
+    # client-side when the AOI selection changes, with no extra round trip --
+    # embedded as a JSON data island (never string-concatenated JS) rather
+    # than one <option> soup per AOI, so JS owns the DOM update, not this
+    # function guessing which AOI is active.
+    dates_by_aoi = (
+        {a: engine.available_dates(a) for a in available_aois} if engine is not None else {default_aoi: []}
+    )
+    dates_by_aoi[ALL_AOIS] = engine.available_dates(ALL_AOIS) if engine is not None else []
+    # `<script>` content is HTML's "raw text" model -- entities are never
+    # decoded inside it, so `html_lib.escape` here would hand JSON.parse a
+    # literal "&quot;" and break it. The only real risk is a literal
+    # "</script" substring prematurely closing the tag; escape just that
+    # (the standard "JSON inside a script tag" mitigation), not the quotes.
+    dates_by_aoi_json = json.dumps(dates_by_aoi).replace("</", "<\\/")
+
+    extent_note = engine.ground_extent_note() if engine is not None else None
+    extent_note_html = f'<p class="muted small">{html_lib.escape(extent_note)}</p>' if extent_note else ""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -417,6 +563,12 @@ def render_index_html(engine: Engine | None = None) -> str:
 <section id="filters">
   <div class="filter-row">
     <fieldset>
+      <legend>AOI</legend>
+      <select id="aoi-select">
+        {aoi_options}
+      </select>
+    </fieldset>
+    <fieldset>
       <legend>AOI bbox (min_lon, min_lat, max_lon, max_lat)</legend>
       <input id="bbox-input" type="text" placeholder="leave empty for no bbox filter">
       <button type="button" id="bbox-apply">Apply</button>
@@ -427,16 +579,19 @@ def render_index_html(engine: Engine | None = None) -> str:
         <option value="">(any)</option>
         {date_options}
       </select>
-      {date_note}
+      <p id="date-note" class="muted small">{date_note}</p>
     </fieldset>
     <button type="button" id="clear-filters" class="secondary">Clear filters</button>
   </div>
   <div id="active-filters" class="active-filters muted small" aria-live="polite"></div>
 </section>
 
+<script id="aoi-dates-data" type="application/json">{dates_by_aoi_json}</script>
+
 <section id="notes" class="muted small">
   <p>{html_lib.escape(CROSS_ROW_CAVEAT)}</p>
   <p>{html_lib.escape(CONFIDENCE_EXPLAINER)}</p>
+  {extent_note_html}
 </section>
 
 <section id="results" aria-live="polite"></section>
@@ -548,7 +703,12 @@ fieldset { border: 1px solid #ccc; border-radius: 6px; padding: 0.5rem; }
 # form to #modal-meta's sibling and a POST to a new /api/ask endpoint; no
 # restructuring of the grid/detail code above should be needed.
 _JS = """
-const state = { bbox: null, date: "", lastQuery: document.getElementById('query-input').value };
+const datesByAoi = JSON.parse(document.getElementById('aoi-dates-data').textContent);
+const state = {
+  bbox: null, date: "",
+  aoi: document.getElementById('aoi-select').value,
+  lastQuery: document.getElementById('query-input').value,
+};
 
 function debounce(fn, ms) {
   let t;
@@ -562,7 +722,7 @@ async function runQuery(text) {
   statusEl.textContent = 'Searching… (first search can take ~10s while the model loads)';
   document.getElementById('search-btn').disabled = true;
   try {
-    const body = { text, top_k: 10 };
+    const body = { text, top_k: 10, aoi: state.aoi };
     if (state.bbox) body.bbox = state.bbox;
     if (state.date) body.date = state.date;
     const resp = await fetch('/api/query', {
@@ -591,15 +751,37 @@ async function runQuery(text) {
 
 function renderActiveFilters(resultCounts) {
   const el = document.getElementById('active-filters');
-  const chips = [];
+  const total = resultCounts ? Object.values(resultCounts).reduce((a,b) => a+b, 0) : 0;
+  const chips = [`<span class="filter-chip">AOI: ${state.aoi === 'all' ? 'All AOIs' : state.aoi} — ${total} result(s)</span>`];
   if (state.bbox) {
-    const total = resultCounts ? Object.values(resultCounts).reduce((a,b) => a+b, 0) : 0;
-    chips.push(`<span class="filter-chip">bbox [${state.bbox.map(v => v.toFixed(4)).join(', ')}] — ${total} result(s)</span>`);
+    chips.push(`<span class="filter-chip">bbox [${state.bbox.map(v => v.toFixed(4)).join(', ')}]</span>`);
   }
   if (state.date) {
     chips.push(`<span class="filter-chip">date = ${state.date}</span>`);
   }
   el.innerHTML = chips.join(' ');
+}
+
+// Part 3 -- the date control is only ever live for an AOI that actually has
+// dated imagery indexed (today: leb). Switching AOI must repopulate (not
+// just enable/disable) the date <select>, since "unknown" AOIs offer no
+// dates at all and a stale option from a previous AOI would silently filter
+// on a date that AOI's tiles can never carry (F-7: excluded, never raises --
+// but a UI offering a dead option is its own kind of dishonesty, U-5's
+// spirit applied to the control itself, not just the copy).
+function updateDateOptionsForAoi(aoi) {
+  const dates = datesByAoi[aoi] || [];
+  const select = document.getElementById('date-select');
+  const note = document.getElementById('date-note');
+  const current = state.date;
+  select.innerHTML = '<option value="">(any)</option>' +
+    dates.map(d => `<option value="${d}">${d}</option>`).join('');
+  select.disabled = dates.length === 0;
+  note.textContent = dates.length === 0 ? 'No dated imagery indexed for this AOI.' : '';
+  if (!dates.includes(current)) {
+    state.date = '';
+  }
+  select.value = state.date;
 }
 
 function renderResults(data) {
@@ -692,10 +874,18 @@ document.getElementById('date-select').addEventListener('change', (e) => {
   runQuery(state.lastQuery);
 });
 
+document.getElementById('aoi-select').addEventListener('change', (e) => {
+  state.aoi = e.target.value;
+  updateDateOptionsForAoi(state.aoi);
+  runQuery(state.lastQuery);
+});
+
+const defaultAoi = state.aoi;
 document.getElementById('clear-filters').addEventListener('click', () => {
-  state.bbox = null; state.date = '';
+  state.bbox = null; state.date = ''; state.aoi = defaultAoi;
   document.getElementById('bbox-input').value = '';
-  document.getElementById('date-select').value = '';
+  document.getElementById('aoi-select').value = defaultAoi;
+  updateDateOptionsForAoi(defaultAoi);
   document.getElementById('active-filters').innerHTML = '';
   runQuery(state.lastQuery);
 });
@@ -712,6 +902,7 @@ runQuery(state.lastQuery);
 
 class QueryRequest(BaseModel):
     text: str = ""
+    aoi: str | None = None
     bbox: list[float] | None = None
     date: str | None = None
     top_k: int = retrieve.TOP_K
@@ -740,10 +931,12 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(422, detail="bbox must have exactly 4 numbers: min_lon, min_lat, max_lon, max_lat")
         top_k = max(1, min(req.top_k, 200))
         try:
-            return answer_query(eng, req.text, bbox=req.bbox, date=req.date, top_k=top_k)
+            return answer_query(eng, req.text, aoi=req.aoi, bbox=req.bbox, date=req.date, top_k=top_k)
         except retrieve.UnitNormError as exc:
             log.exception("app: embedder returned a non-unit query vector")
             raise HTTPException(500, detail="the embedder returned an invalid vector for that query") from exc
+        except ValueError as exc:  # unknown AOI (Engine.get_corpus) -- a clean 422, not a 500
+            raise HTTPException(422, detail=str(exc)) from exc
         except Exception as exc:  # never a raw traceback to the client (S5 abuse-case requirement)
             log.exception("app: unexpected error answering query %r", req.text)
             raise HTTPException(500, detail=f"unexpected error answering that query: {exc.__class__.__name__}") from exc

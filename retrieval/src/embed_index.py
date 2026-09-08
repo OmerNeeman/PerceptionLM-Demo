@@ -118,6 +118,23 @@ def _manifest_paths(aoi_dir: Path) -> tuple[Path, Path]:
     return aoi_dir / MANIFEST_NAME, aoi_dir / VECTORS_NAME
 
 
+def list_indexed_aois(index_root: Path | None = None) -> list[str]:
+    """Every AOI that has a complete on-disk index (`manifest.json` +
+    `vectors.npy` both present under `emb/<aoi>/`) -- brief S6, Part 3:
+    this is how the app discovers "all AOIs" without a hardcoded list, so a
+    later stage that indexes a ninth scene needs no app.py change. Sorted for
+    a stable, deterministic AOI-selector order."""
+    root = index_root or config.get_index_root()
+    emb_root = root / "emb"
+    if not emb_root.exists():
+        return []
+    out = []
+    for p in emb_root.iterdir():
+        if p.is_dir() and (p / MANIFEST_NAME).exists() and (p / VECTORS_NAME).exists():
+            out.append(p.name)
+    return sorted(out)
+
+
 # --------------------------------------------------------------------------
 # Atomic on-disk state -- write-tmp-then-rename, vectors before manifest.
 # --------------------------------------------------------------------------
