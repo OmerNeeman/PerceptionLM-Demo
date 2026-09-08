@@ -1453,3 +1453,28 @@ anything). The PM completed verification directly rather than re-dispatching.
 check, and the whole polish pass (modal metadata, `pyproj` startup warning,
 S4 tests touching `index/export/`, the measured-RSS note in `INSTRUCTIONS.md`).
 None blocks use; all are recorded rather than quietly dropped.
+
+### S5b parity — the check its agent died before writing. PM completed it.
+
+**MEAN PARITY 1.000** — 4 queries x 3 scales, top-10 by pixel offset, export
+against local. The shipped file returns **exactly** the local result.
+
+| | tents | a car | palm trees | sand |
+|---|---|---|---|---|
+| 448 / 224 / 112 | 1.0 / 1.0 / 1.0 | 1.0 / 1.0 / 1.0 | 1.0 / 1.0 / 1.0 | 1.0 / 1.0 / 1.0 |
+
+Structural corroboration: per-scale counts identical (466 / 1,843 / 7,322 =
+9,631 both sides), same 384-d basis, same int8 quantisation.
+
+*Two decoding traps the PM hit, worth recording for whoever reads the payload
+next:* the U-5 caveat is **HTML-entity encoded** (`&ndash;`), so a naive grep for
+"35-45" returns nothing and looks like a missing requirement; and pixel offsets
+are stored **int16, not int32**, so decoding at the wrong width silently yields
+half the rows and an out-of-range index. Neither was a defect in the artifact —
+both were defects in the PM's first reading of it. **A negative result about an
+artifact is evidence about your pattern before it is evidence about the file.**
+
+**Query set: 226 phrases, balanced** — 58 small-object, 59 structure, 57 terrain,
+52 damage. The owner's named vocabulary is present in article form (`a dirt
+road`, `a collapsed roof`); type-to-filter is substring-based so the bare nouns
+reach them.
