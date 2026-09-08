@@ -1171,3 +1171,117 @@ retrieval benefit.
 this, because both hold batch composition constant by construction. The
 criterion was passing for a **structural reason rather than because the property
 held**. That is a category of false green worth watching for elsewhere.
+
+---
+
+## s4-review — 2026-09-08 — retrieval core; U-3 proved unsatisfiable; export budget re-chosen
+
+S4 returned `DONE_WITH_CONCERNS`. Sent back on three items. Two owner decisions
+taken.
+
+### What S4 got right
+
+Per-scale ranking, F-3/F-5/F-6, **CPU latency 9-18 ms against a 200 ms budget**
+(~15x margin), reload 0.13 s against 5 s.
+
+And one genuinely good catch: the first PCA implementation scored 0.00-0.10
+overlap, and the worker correctly diagnosed **why** rather than accepting it as
+a finding — this corpus's **mean vector has norm 0.906**, so textbook
+mean-centering discards signal rather than noise. Switching to an uncentered
+second-moment PCA took it to ~0.71. A worse worker would have reported "PCA
+export destroys retrieval" as a measured result.
+
+### FINDING — U-3's automatic empty state is not achievable. AMENDED.
+
+S4 reported that U-3's literal wording failed and substituted a different
+statistic, calibrated to the five values the PM had supplied. **The PM tested
+that substitute on unseen queries and it does not generalise:**
+
+- 112 px: misses `submarine`, `a ski slope`, `penguins` (absent, called strong).
+- 448 px: flags `sand` and `a building with a flat roof` — **both present** — as
+  weak, and misses three absent queries.
+
+So the PM asked the prior question: can **any** relative statistic do this? Over
+8 present and 8 absent queries on the real index:
+
+| statistic | present range | absent range | separable? |
+|---|---|---|---|
+| `top1` | 0.257-0.299 | 0.210-0.277 | no |
+| `z_mean` | 1.619-4.607 | 2.685-4.469 | no |
+| `gap_top10` | 0.126-0.684 | 0.294-**0.812** | no |
+| `gap_top50` | 0.236-1.697 | 0.629-1.473 | no |
+| `gap_top100` | 0.307-2.149 | 0.895-1.884 | no |
+| `top10_z` | 1.553-4.222 | 2.495-3.946 | no |
+| `skew` | -0.948-0.668 | -0.881-0.984 | no |
+| `n_within_1pct` | 1-6 | 1-4 | no |
+
+**Every one overlaps.** Raw scores overlap too: `a snowy mountain` (absent)
+0.2769 beats `a car` (present) 0.2650.
+
+**The isolation statistics run backwards**, which is the deep reason no boolean
+can work. `gap_top10` reaches **0.812 for absent** queries against **0.684 for
+present** ones: an abundant class like `tents` has many near-equal matches and
+therefore a *small* gap, while `penguins` retrieves a handful of odd tiles that
+stand alone and therefore a *large* one. **Isolation measures novelty, not
+presence.** Any "does the top hit stand out" heuristic is measuring the wrong
+thing.
+
+*Owner decision:* replace the boolean with a **calibrated confidence band**
+against a stored, seeded background set of ~30 unrelated queries, per scale,
+shown alongside results and never gating them — worded **"may not be present"**,
+never "is not present".
+
+*Why this is not a weakening:* it swaps an unachievable binary for an achievable
+and more informative display, and adds two requirements (reproducible stored
+background; mandated wording). **A large present/absent overlap in the bands is
+the correct outcome and must not be tuned away.**
+
+*And it is itself a product finding.* "This embedder cannot reliably tell you
+when a thing is absent" is exactly what a scoping demo exists to surface. Hiding
+it behind a confident binary would corrupt the decision the demo informs.
+
+### The owner's third question, answered — and the default changed
+
+**Retrieval@10 overlap, full precision vs export, measured by the PM over 8
+queries on the real index:**
+
+| dim | dtype | MB | 448 | 224 | 112 | mean |
+|---|---|---|---|---|---|---|
+| 128 | int8 | 1.23 | 0.738 | 0.750 | 0.650 | **0.713** *(old default)* |
+| 256 | int8 | 2.47 | 0.838 | 0.825 | 0.738 | 0.800 |
+| **384** | **int8** | **3.70** | 0.850 | 0.838 | 0.812 | **0.833** *(chosen)* |
+| 384 | fp16 | 7.40 | 0.875 | 0.900 | 0.838 | 0.871 |
+| 768 | fp16 | 14.79 | 1.000 | 1.000 | 1.000 | **1.000** |
+
+**So yes — PCA-to-128 costs measurable quality: ~29% of top-10 results change.**
+
+Two things the curve makes clear that a single number would not:
+
+1. **768-d fp16 is exactly 1.000** — lossless by construction, since the local
+   index is already fp16. So the loss is **dimensionality reduction**, with int8
+   adding a few points on top; it is not an artifact of quantisation alone.
+2. **128 was the worst point on the curve** and was inherited from a budget
+   estimate made when the embedder was 1280-d PE-Core. At 768-d the sums changed
+   and nobody had rechecked. *Lesson: a config default set under superseded
+   assumptions is not a decision, it is a leftover.*
+
+*Owner chose 384-d int8* — 0.833 at 3.70 MB, best quality per megabyte, leaving
+~12 MB of the 16 MB cap for thumbnails, which dominate the budget at 9,631
+tiles.
+
+### DEFECT — the test suite was destroying a production artifact
+
+`tests/test_tiling.py` writes to the **real** index root in three places, one of
+them `plan_all(scales=(448,))`, which **truncates `index/tileplan/*.json` to
+scale 448**. The PM regenerated the full three-scale plan after S2; running the
+suite silently destroyed it again.
+
+S4 then hit the damage, correctly diagnosed it as a test side effect — and
+**worked around it** by re-planning in memory rather than flagging it. That is
+the wrong call: it treated a self-inflicted wound as an external constraint, and
+it left F-10's map-location join unproven against the artifact that actually
+ships. Sent back to fix the tests and prove the join from the real files.
+
+*Standing lesson, third instance in this project:* **check the artifact, not the
+report.** A green suite says the code is right; it says nothing about what is on
+disk — and here the suite was itself the thing corrupting the disk.

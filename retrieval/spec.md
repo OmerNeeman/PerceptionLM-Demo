@@ -8,7 +8,7 @@ directed that implementation begin in a fresh session (see `HANDOFF.md`).
 
 Config symbols used below: `SCALES` (default `[448, 224, 112]` — a **list**,
 not a scalar; see `notes.md#research-1`), `OVERLAP` (default 0.0),
-`EMB_DTYPE` (export precision), `EXPORT_DIM` (PCA target, default 128),
+`EMB_DTYPE` (export precision, **int8**), `EXPORT_DIM` (PCA target, **384** — raised from 128 at S4 on measured evidence, `notes.md#s4-review`),
 `TOP_K`.
 
 ---
@@ -391,6 +391,10 @@ within a row.
 **U-3 — Empty state guides.** A query with no hits above threshold explains
 that and suggests a broader term. Never a blank grid, never a stack trace.
 
+> **SUPERSEDED by the amendment below.** The relative-gap rule was the right
+> call on S0's evidence, but S4 measured that no relative statistic actually
+> separates present from absent on this corpus.
+>
 > **CLARIFIED — owner signed off 2026-09-07** (`notes.md#s0-bakeoff`).
 > **The threshold is a per-query relative gap, never an absolute cosine
 > cut-off.** A weak match is one whose top score fails to stand out from that
@@ -404,6 +408,52 @@ that and suggests a broader term. Never a blank grid, never a stack trace.
 > *This is a clarification, not an amendment:* U-3 required only that the empty
 > state **exist and guide**, never that the threshold be absolute. Nothing was
 > weakened. E-2's known-negative query supplies the calibration data.
+
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-08** (`notes.md#s4-review`).
+> **Was:** an empty state triggered when no hit clears a per-query relative gap.
+> **Now:** **no boolean verdict at all.** The interface shows a **calibrated
+> confidence band** — where this query's top score falls against a stored,
+> seeded background distribution of ~30 unrelated queries, computed **per
+> scale** — displayed *alongside* results, never gating or hiding them.
+> **Low confidence must read "may not be present", never "is not present".**
+> Those are different claims and only one is supported by the evidence.
+>
+> *Why amended, not sent back:* the criterion is **unsatisfiable as written**,
+> and this was established by measurement rather than by failing to achieve it.
+> Over 8 present and 8 absent queries on the real index, **eight** candidate
+> statistics were tested — `top1`, `z_mean`, `gap_top10`, `gap_top50`,
+> `gap_top100`, `top10_z`, `skew`, `n_within_1pct` — and **every one overlaps**.
+> Raw scores overlap too: `a snowy mountain` (absent) scores **0.2769** against
+> `a car` (present) **0.2650**.
+>
+> The isolation statistics are **backwards**, which is the deep reason a boolean
+> cannot work: `gap_top10` reaches **0.812** for absent queries against a
+> maximum of **0.684** for present ones. An abundant class such as `tents` has
+> many near-equal matches and therefore a *small* gap, while `penguins`
+> retrieves a handful of odd tiles that stand alone and therefore a *large* one.
+> Isolation measures novelty, not presence.
+>
+> *Evidence of the failure it replaces:* the tuned boolean
+> (`WEAK_GAP_MULTIPLE = 0.75`, fitted to five calibration values) missed
+> `submarine`, `a ski slope` and `penguins` at 112 px, and at 448 px flagged
+> `sand` and `a building with a flat roof` — **both present** — as weak. A
+> demo whose gate is qualitative cannot ship a signal that mislabels real hits.
+>
+> *This is not a weakening.* It replaces an unachievable binary with an
+> achievable, honest, and **more informative** display, and it adds two
+> requirements (a stored reproducible background set; mandated wording).
+> **A large overlap between present and absent bands is the expected, correct
+> outcome and must not be tuned away.**
+>
+> *And it is itself a finding.* "This embedder cannot reliably tell you when a
+> thing is absent" is exactly the kind of result a product-scoping demo exists
+> to surface (`CLAUDE.md`, problem statement). Concealing it behind a confident
+> binary would corrupt the decision the demo is built to inform.
+>
+> *Expected:* the background set is stored with the export and reproducible
+> across processes; bands are computed per scale; no absolute cosine constant
+> appears anywhere in the path; results are never hidden or reordered by the
+> band; the "may not be present" wording appears in the UI.
 
 **U-4 — Feedback on anything over 300 ms**, specifically the first query
 (model/index warm-up) and any Q&A call.
@@ -524,7 +574,7 @@ absent content is the failure mode this exposes.
 | N-7 | fresh-session cold start |
 | N-8 | `test_no_machine_paths` (grep of `src/`), `test_dtype_for_device` (cc<8 -> fp16, cc>=8 -> bf16, cpu -> fp32), `test_cpu_only_build`, `test_manifest_path_portable` |
 | N-9 | fresh session executes `INSTRUCTIONS.md` on a foreign machine and reports blockers; anything it asked = defect |
-| U-1..U-8 | adversarial UX review against the rendered export; U-3 additionally `test_weak_match_is_relative` — a known-negative query is flagged weak, and no absolute cosine constant appears in the threshold path |
+| U-1..U-8 | adversarial UX review against the rendered export; U-3 additionally `test_confidence_band_is_relative` (no absolute cosine constant; bands from the stored background set) and `test_confidence_band_reproducible` (same band across processes). **Not** a pass/fail on separating present from absent — that was measured impossible |
 | E-1, E-2 | eval report, non-gating |
 
 **Value -> dependents** (re-verify these when the value changes):
