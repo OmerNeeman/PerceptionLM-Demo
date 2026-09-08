@@ -8,7 +8,7 @@ directed that implementation begin in a fresh session (see `HANDOFF.md`).
 
 Config symbols used below: `SCALES` (default `[448, 224, 112]` — a **list**,
 not a scalar; see `notes.md#research-1`), `OVERLAP` (default 0.0),
-`EMB_DTYPE` (export precision), `EXPORT_DIM` (PCA target, default 128),
+`EMB_DTYPE` (export precision, **int8**), `EXPORT_DIM` (PCA target, **384** — raised from 128 at S4 on measured evidence, `notes.md#s4-review`),
 `TOP_K`.
 
 ---
@@ -19,15 +19,87 @@ not a scalar; see `notes.md#research-1`), `OVERLAP` (default 0.0),
 A raster is source imagery iff it has >= 3 bands AND its sampled pixel values
 show > 64 distinct levels in each of bands 1-3. Derived rasters (binary masks,
 class rasters, fused CD output) are excluded.
-*Expected:* on `leb`, exactly 2 of 31 rasters qualify — `2022-10-29.tif` and
-`2025-06-06.tif`. The classifier must return exactly that set, by value
-inspection, never by filename pattern.
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-07.**
+> **Was:** "*on `leb`, exactly 2 of 31 rasters qualify — `2022-10-29.tif` and
+> `2025-06-06.tif`. The classifier must return exactly that set.*"
+> **Why amended, not sent back:** the clause is **factually false about the
+> rule in D-1's own first sentence**, so no faithful implementation can satisfy
+> both. `leb/leb_crop_x4096_y3072_1024.tif` is real 3-band EPSG:3857 imagery
+> with distinct counts `[236,246,255]` — it passes `> 64` in all three bands on
+> any sampling strategy. Its mtime is 2026-08-20, **two and a half weeks before
+> this project began**, so it is pre-existing data: the number was always
+> wrong, not made wrong. Recon measured *indexable scenes* and recorded it as
+> *qualifying rasters*.
+> **Independent confirmation** (methodology §3 requires it for a measurable
+> criterion): an adversarial reviewer with fresh context ruled the clause
+> genuinely wrong **after first arguing the opposite case and finding it fails
+> on three independent grounds** — the two-predicate split is already required
+> by S1's brief (`gaza.tiff` must be source-but-not-indexable) and by
+> `docs/DATA.md` (which calls `Teheran/` "66 source"); the clause contradicts
+> D-1's own rule on real data; and it is the third measurement error found in
+> the same recon, all erring the same direction. PM independently verified the
+> crop's byte-identity (md5 `e3b380b8e5c3`) and the 31 denominator.
+> **Nothing was weakened** — the spec now pins *two* exact sets where it
+> previously pinned one, so this is strictly more checkable than before.
+
+*Expected:* on `leb`, exactly **2 of 31** rasters are **indexable source
+scenes** — `2022-10-29.tif` and `2025-06-06.tif`. The pixel rule alone accepts
+**4** rasters under `leb/`: those two, plus `leb_crop_x4096_y3072_1024.tif`
+(real 3-band EPSG:3857 imagery, byte-identical to the 1024x1024 window of
+`2022-10-29.tif` at pixel offset (4096, 3072), rejected as `duplicate_of` /
+`contained_crop`) and `tmp_results/cls_leb_legend.png` (a 357x233 colour
+legend, rejected as `no_georeference`).
+
+Being source imagery is **necessary but not sufficient** to be indexable; the
+two predicates are reported separately, and every rejection carries one of the
+five specific causes (`derived_raster`, `too_few_bands`, `no_georeference`,
+`resolution_regime_excluded`, `duplicate_of`).
+
+The pixel-rule decision must be made by value inspection, **never by filename
+pattern** — asserted over **renamed symlinks**, which is the only assertion
+that actually catches a filename dependency (a naive date-regex fast path
+passes the obvious test).
+
+> **Known exposure, deliberately not fixed** (tech-debt, `plan.md`): D-1's rule
+> tests for *photographic value statistics*, not for *being real imagery*.
+> Three segmentation **visualisations** in the tree
+> (`iran/*_seg_vis.png`) pass it, and are excluded only incidentally because
+> PNG carries no georeference. Written as GeoTIFFs at 10 cm they would be
+> indexed as source. Uniform random noise also passes.
 
 **D-2 — All reported ground distances are true ground metres.**
 For any Mercator CRS, ground distance = projected distance x cos(latitude).
 *Expected:* for `leb` (EPSG:3857, lat 33.10707, pixel 0.125002 m) the reported
 GSD is 10.47 cm/px +/- 0.01 and a 448 px tile reports 46.91 m +/- 0.05. A
-result of 12.5 cm/px or 56.0 m is a failure, not a rounding difference.
+result of 12.5 cm/px or 56.0 m is a failure, not a rounding difference. For the
+UTM scenes (EPSG:32636) the reported GSD is 10.00 cm/px and a 448 px tile
+44.80 m, with **no** cosine correction — applying it there (giving ~8.4 cm) is
+exactly as wrong as omitting it from a Mercator scene.
+
+> **STRENGTHENED — owner signed off 2026-09-07.** *Added, not relaxed.*
+> **Every reported ground resolution is cross-checked against an independent
+> ellipsoidal geodesic measurement, and disagreement beyond a stated tolerance
+> fails loudly** — naming both figures and the CRS, never falling back to
+> either silently.
+> *Why:* the analytic rule above is **over-general**. `cos(latitude)` is correct
+> only for a Mercator whose standard parallel is the equator; for `lat_ts != 0`
+> the factor is `cos(lat)/cos(lat_ts)`. Measured: EPSG:3994 (Mercator 41) is
+> **24.5% wrong**, `+proj=merc +lat_ts=45` **29.3% wrong**, and Hotine Oblique
+> Mercator is misclassified as Mercator and given a cosine it should not get.
+> No scene in the corpus is affected, and the code faithfully implements the
+> rule — so this is not a compliance failure but a latent trap of exactly the
+> class trap 3 exists to prevent.
+> *Why a guard rather than a longer formula:* the geodesic value is **already
+> computed for every raster and then discarded**. An independent reviewer found
+> it agreed with its own ellipsoidal measurement in **100% of probes across Web
+> Mercator, three UTM zones and geographic, to all printed digits**. Real
+> agreement is within **0.17%**; the failure cases diverge by **24-29%**. So one
+> assertion catches every bad projection — including ones nobody enumerated —
+> for free.
+> *Expected:* the tolerance is stated and justified from that evidence; all
+> eight indexable scenes pass it; a secant-Mercator CRS raises. **Failing loudly
+> is the requirement** — a silently 25%-wrong ground measurement is the outcome
+> being prevented.
 
 **D-3 — The data directory is read-only.**
 No process writes, moves, renames or converts anything under
@@ -70,6 +142,23 @@ this domain. All are off-the-shelf and require no training.
 Changing embedder later invalidates the entire index, so this decision is made
 first and recorded in the manifest.
 
+> **SETTLED at S0, 2026-09-07 — `notes.md#s0-bakeoff`, evidence in
+> `briefs/S0_result.md`.** Chosen: **RemoteCLIP-ViT-L-14, 768-d**
+> (`chendelong/RemoteCLIP` @ `bf1d8a3ccf2ddbf7c875705e46373bfe542bce38`).
+> It is the only candidate whose known-absent control is beaten by all 8 real
+> queries (+0.0135 margin; PE-Core-L14 scored **-0.0157** — its
+> `aircraft carrier` outranked its own `car`). 4/5 genuine vehicle crops at
+> 112 px vs 3/5 and 2/5; 265 tiles/sec vs 84.5 and 11.6.
+> **This is F-0's output, not an amendment** — F-0 exists to be decided by
+> measurement, and it was. PM re-ran the suite (12/12) and re-read the crops
+> independently.
+>
+> **Also settled by S0, and load-bearing for every later stage:** 448 px
+> surfaces **zero** vehicles for **every** candidate (0/5, 0/5, 0/5), while
+> 112 px takes top-1 for `car` in all three. Without the finest pyramid level
+> this system cannot find a vehicle at all. `SCALES` is not a tuning
+> preference; it is the reason retrieval works.
+
 **F-1a — One embedder serves every scale.**
 Different models occupy different embedding spaces, so a query vector cannot be
 compared across them.
@@ -78,12 +167,20 @@ build that would mix embedders fails loudly rather than producing a mixed
 index. Every tile is resized to the model's native input, so a 112 px crop and
 a 448 px crop cost the same forward pass.
 
-**F-2 — Tile embeddings are unit-normalised vectors from PE Core.**
-One pooled vector per tile per scale — the attention-pool output, which is the
-only PE-Core representation actually aligned to the text tower. Patch tokens
-are **not** used; see `notes.md#research-1` for why.
+**F-2 — Tile embeddings are unit-normalised, text-aligned pooled vectors.**
+One pooled vector per tile per scale — **the model's own text-aligned image
+embedding**, whatever produces it: the projected CLS token for RemoteCLIP /
+OpenCLIP ViT-L-14, the attention-pool output for PE Core. Take it from the
+model's public `encode_image` path; do not reach inside for an intermediate.
+**Patch tokens are never used at any scale** — see `notes.md#research-1` and
+`notes.md#arch-confirm`. The reason survives the embedder change: patch tokens
+of a CLIP-family tower never entered the contrastive objective, so they are not
+text-comparable, and the published attempt scored 2.5 nDCG@5 against 51.4 for
+simply pooling. Small objects are handled by the `SCALES` pyramid instead — S0
+measured that this works (112 px takes top-1 for `car`; 448 px finds none).
 *Expected:* `||v||_2 = 1.0 +/- 1e-5` for every tile; dimensionality equals the
-model's (1280 for PE-Core-G14-448, 1024 for L14-336); the stored index records
+model's — **768 for the chosen RemoteCLIP-ViT-L-14** (1280 for
+PE-Core-G14-448, 1024 for L14-336 if ever reverted to); the stored index records
 model id, revision, and the scale each vector came from.
 
 **F-2a — Export embeddings are PCA-reduced and quantised.**
@@ -103,6 +200,27 @@ Since vectors are unit-normalised, cosine = dot product.
 *Expected:* top-`TOP_K` results are sorted by score descending; scores lie in
 [-1, 1]; a query embedding compared against itself scores 1.0 +/- 1e-5.
 Results are exact (brute force), not approximate.
+
+> **CLARIFIED — owner signed off 2026-09-07** (`notes.md#s0-bakeoff`).
+> **Ranking is per scale: one ranking per entry in `SCALES`, never a single
+> pooled ranking across scales.** Each is labelled with its true ground extent
+> (11 m / 22 m / 47 m).
+> *Why:* S0 measured that 112 px takes top-1 for **9/9** queries on both PE
+> candidates, so a pooled ranking is dominated by the finest scale even where
+> that scale is the wrong one to look at — an 11.2 m crop physically cannot
+> contain a road as a linear object, which is why `dirt road` and `sand`
+> converge there.
+> Rejected alternatives: within-scale score normalisation (the fusion weights
+> would be a tuning knob with **no ground truth to tune against** — `Car` has
+> zero labels), and a scale selector (U-6 already has filters to keep legible).
+> *This is a clarification, not an amendment:* F-4 specified cosine, sorted,
+> bounded and exact, and said **nothing** about how scales combine. The point
+> was **unspecified, not weakened** — no criterion was loosened, and per
+> methodology §8 the worker correctly stopped rather than inventing a fusion
+> rule. `TOP_K` now means top-`TOP_K` *per scale*.
+> *Expected, added:* a query returns exactly `len(SCALES)` rankings, each
+> sorted descending and each tagged with its scale and true ground extent; no
+> result appears in a ranking for a scale it was not embedded at.
 
 **F-5 — The index persists and reloads without recomputation.**
 *Expected:* build once, reload in a fresh process, and the same query returns
@@ -133,6 +251,35 @@ that date's tiles only; the returned tile ids all carry that date.
 > *Expected:* filtering `leb` to `2025-06-06` halves that AOI's candidate pool
 > and every returned id carries that date; an undated AOI returns nothing under
 > a date filter and does not raise.
+
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-08** (`notes.md#s4-green`).
+> **The system is two artifacts, and free-text querying lives on the local
+> side only.**
+>
+> **Was:** one exported HTML that "opens and queries with no server and no
+> network", implicitly for any text the user types.
+> **Now:**
+> 1. **Local query app** — arbitrary typed text, the full-precision index, tile
+>    Q&A (U-8, F-9). This is what the owner explores and judges.
+> 2. **Exported HTML** — standalone, offline, shareable, **querying a curated
+>    set of precomputed query vectors** (clickable, with type-to-filter over
+>    that set). No free text. No Q&A box.
+>
+> *Why unsatisfiable as written:* answering typed text requires the text tower.
+> **Measured: 123.7 M parameters — 247 MB fp16, 124 MB int8 — against a 16 MB
+> cap that must also hold ~9,631 thumbnails.** That is **15.5x the entire
+> budget**, and no compression closes a gap of that size. U-8's question box is
+> further out of reach still, needing a VLM.
+> *This is not a scope cut made for convenience.* `notes.md#intake` decision 3
+> already separated "full local index" from "the HTML viewer is a per-AOI
+> export"; the two-component architecture was always the design. What was never
+> stated is which capabilities live on which side. This states it.
+> *What is preserved:* F-8's offline guarantee — the single property that makes
+> the export worth sharing — is kept intact rather than traded away for an
+> interactivity the format cannot support.
+> *Precomputed query set:* ~200 phrases spanning the four vocabularies the owner
+> named (small objects, structures, terrain, damage), stored as 384-d int8.
+> **77 KB** — a rounding error against the cap.
 
 **F-8 — The exporter writes a standalone HTML under the size cap.**
 *Expected:* for a chosen AOI + date subset the output is a single file,
@@ -170,7 +317,33 @@ re-embedding completed tiles.
 where a shadowed CPU torch makes the build silently run on CPU.
 
 **N-4 — Determinism.** Fixed seeds; same tile bytes produce the same embedding
-to within 1e-5 across runs on the same device.
+to within 1e-5 across runs on the same device, **at a fixed batch size**.
+
+> **AMENDED — owner signed off 2026-09-07** (`notes.md#s3-review`).
+> **Added:** the invariance condition, and a requirement that the manifest
+> record `batch_size`.
+> *Why amended:* determinism across **processes** — fresh interpreter, fresh
+> CUDA context, fresh model load — is **exact (0.000e+00)** when batch
+> composition is held identical. But the same tile embedded **alone** differs
+> from that tile inside a **batch of 32** by up to **2.574e-4**, 25x this
+> tolerance. Cause is GPU fp16 GEMM non-associativity: the kernel is selected by
+> batch shape. It is not a defect in our code and cannot be fixed in it.
+> *Why not simply widen the tolerance to 1e-3:* that would loosen the bar for
+> the case that already passes **exactly**, which is the weakening direction.
+> Stating the condition is strictly more informative than relaxing the number.
+> *Why not force batch size 1:* it would make the criterion hold
+> unconditionally at ~50x the cost — the demo AOI from 40 s to ~35 min, the full
+> pyramid from 6.8 min to ~5.6 h — buying reproducibility across batch sizes and
+> nothing else. Retrieval is unaffected either way: **within one index every
+> vector shares one batch composition**, so the discrepancy can only appear
+> between two differently-batched rebuilds.
+> *Expected, added:* the manifest records `batch_size`; a resume under a
+> different batch size logs a warning naming both; cross-batch deviation is
+> documented as <= 2.6e-4 and is **not** a failure.
+> *Independent confirmation:* measured by the adversarial reviewer, which also
+> established that neither shipped test could detect it — both hold batch
+> composition constant by construction, so the criterion was passing for a
+> structural reason rather than because the property held.
 
 **N-5 — Nothing large is committed.** No weights, tiles, embeddings, imagery
 or COGs in git.
@@ -185,6 +358,51 @@ truncate results.
 builds the index without asking a question. Verified by an actual fresh
 session, not by inspection.
 
+**N-8 — Portable across OS, GPU generation, and CPU-only.** *(added
+2026-09-07 at owner request — see `notes.md#owner-portability`.)*
+Nothing machine-specific may be embedded in `src/`. The system runs on Linux
+and Windows, on any CUDA GPU generation, and with no GPU at all.
+*Expected, each separately checkable:*
+- **No absolute machine-specific path anywhere in `src/`.** A test greps the
+  package for `/home/`, `C:\\`, `anaconda3` and the data-root literal and
+  fails on any hit. The data root, index root and model cache come from
+  **config with environment-variable override**, and the config carries no
+  default that only exists on one machine.
+- **dtype is selected by device capability, never hardcoded.** A pure function
+  maps device -> dtype and is asserted directly: CUDA compute capability
+  **< 8.0 -> `float16`** (Turing/Volta: bf16 is emulated and 5.6x slower);
+  **>= 8.0 -> `bfloat16` permitted** (Ampere and later have native bf16);
+  **CPU or MPS -> `float32`** (fp16 on CPU is unsupported or pathologically
+  slow). The current machine is cc 7.5, so it must still resolve to
+  `float16` — the existing behaviour is a *case* of the rule, not the rule.
+- **Runs with no GPU.** Forcing device `cpu` completes an index build and a
+  query, at documented reduced throughput. Asserted by an actual CPU-forced
+  run over a small tile set, not by inspection.
+- **Path handling is OS-agnostic.** `pathlib` throughout; no string
+  concatenation of separators, no POSIX-only assumptions. Tile ids and manifest
+  keys use a single canonical separator so an index built on one OS loads on
+  the other. A test asserts a manifest written with Windows-style inputs reads
+  back identically.
+- **No interpreter path in code.** A specific interpreter may appear in
+  documentation as an example; it may not appear in importable code.
+
+**N-9 — `INSTRUCTIONS.md` cold-starts a foreign machine.** *(added
+2026-09-07 at owner request.)*
+A single top-level document that a person or a fresh agent can follow on a
+machine that is **not** this one, to install, build an index, query it, and
+produce the export.
+*Expected:* it states prerequisites and how to check them; covers **Linux and
+Windows** side by side; covers **CUDA, and CPU-only**; names the dtype rule and
+why it differs per GPU generation; explains where imagery is expected and how
+to point the system at a different location; gives copy-pasteable commands per
+platform; lists expected wall times with the hardware they assume; and has a
+troubleshooting section for the failure modes actually encountered (shadowed
+CPU torch, bf16 on pre-Ampere, `pyproj` PROJ database, GDAL/rasterio install,
+the Mercator GSD correction). **Verified by execution, not by review** — a
+fresh session follows it with no prior context and no access to this
+conversation, and reports where it got stuck. Anything it had to ask is a
+defect in the document.
+
 ---
 
 ## 4. UX requirements
@@ -194,10 +412,77 @@ rest; no blank box requiring the user to guess vocabulary.
 
 **U-2 — Results are a scored, located grid.** Each hit shows its thumbnail,
 similarity score, date, and lat/lon. Score formatting is fixed-width so a
-column of scores is scannable.
+column of scores is scannable. **Results are grouped into one row per scale,
+each row labelled with its true ground extent** (per F-4's clarification) — so
+the user can see which scale found a hit, and scores are only ever compared
+within a row.
 
 **U-3 — Empty state guides.** A query with no hits above threshold explains
 that and suggests a broader term. Never a blank grid, never a stack trace.
+
+> **SUPERSEDED by the amendment below.** The relative-gap rule was the right
+> call on S0's evidence, but S4 measured that no relative statistic actually
+> separates present from absent on this corpus.
+>
+> **CLARIFIED — owner signed off 2026-09-07** (`notes.md#s0-bakeoff`).
+> **The threshold is a per-query relative gap, never an absolute cosine
+> cut-off.** A weak match is one whose top score fails to stand out from that
+> query's corpus mean by a stated multiple of the score spread; the multiple
+> must be **visible in the UI**, not buried in code.
+> *Why:* S0 measured that absolute cosine magnitude carries no cross-query
+> meaning. PE-Core-L14's known-absent `aircraft carrier` scored **+0.2002,
+> above its own best `car` at +0.1845**; PE-Core-G14's control margin is
+> +0.0019; even the chosen RemoteCLIP's +0.0135 sits against a 0.0415 spread.
+> Any fixed cut-off would either suppress real hits or pass pure noise.
+> *This is a clarification, not an amendment:* U-3 required only that the empty
+> state **exist and guide**, never that the threshold be absolute. Nothing was
+> weakened. E-2's known-negative query supplies the calibration data.
+
+> **AMENDMENT ACCEPTED — owner signed off 2026-09-08** (`notes.md#s4-review`).
+> **Was:** an empty state triggered when no hit clears a per-query relative gap.
+> **Now:** **no boolean verdict at all.** The interface shows a **calibrated
+> confidence band** — where this query's top score falls against a stored,
+> seeded background distribution of ~30 unrelated queries, computed **per
+> scale** — displayed *alongside* results, never gating or hiding them.
+> **Low confidence must read "may not be present", never "is not present".**
+> Those are different claims and only one is supported by the evidence.
+>
+> *Why amended, not sent back:* the criterion is **unsatisfiable as written**,
+> and this was established by measurement rather than by failing to achieve it.
+> Over 8 present and 8 absent queries on the real index, **eight** candidate
+> statistics were tested — `top1`, `z_mean`, `gap_top10`, `gap_top50`,
+> `gap_top100`, `top10_z`, `skew`, `n_within_1pct` — and **every one overlaps**.
+> Raw scores overlap too: `a snowy mountain` (absent) scores **0.2769** against
+> `a car` (present) **0.2650**.
+>
+> The isolation statistics are **backwards**, which is the deep reason a boolean
+> cannot work: `gap_top10` reaches **0.812** for absent queries against a
+> maximum of **0.684** for present ones. An abundant class such as `tents` has
+> many near-equal matches and therefore a *small* gap, while `penguins`
+> retrieves a handful of odd tiles that stand alone and therefore a *large* one.
+> Isolation measures novelty, not presence.
+>
+> *Evidence of the failure it replaces:* the tuned boolean
+> (`WEAK_GAP_MULTIPLE = 0.75`, fitted to five calibration values) missed
+> `submarine`, `a ski slope` and `penguins` at 112 px, and at 448 px flagged
+> `sand` and `a building with a flat roof` — **both present** — as weak. A
+> demo whose gate is qualitative cannot ship a signal that mislabels real hits.
+>
+> *This is not a weakening.* It replaces an unachievable binary with an
+> achievable, honest, and **more informative** display, and it adds two
+> requirements (a stored reproducible background set; mandated wording).
+> **A large overlap between present and absent bands is the expected, correct
+> outcome and must not be tuned away.**
+>
+> *And it is itself a finding.* "This embedder cannot reliably tell you when a
+> thing is absent" is exactly the kind of result a product-scoping demo exists
+> to surface (`CLAUDE.md`, problem statement). Concealing it behind a confident
+> binary would corrupt the decision the demo is built to inform.
+>
+> *Expected:* the background set is stored with the export and reproducible
+> across processes; bands are computed per scale; no absolute cosine constant
+> appears anywhere in the path; results are never hidden or reordered by the
+> band; the "may not be present" wording appears in the UI.
 
 **U-4 — Feedback on anything over 300 ms**, specifically the first query
 (model/index warm-up) and any Q&A call.
@@ -216,6 +501,17 @@ scroll.
 
 **U-8 — A tile opens.** Clicking a result gives a larger view plus its
 question box; the answer appears attached to that tile, not in a global log.
+
+> **AMENDED — owner signed off 2026-09-08** (`notes.md#s4-green`).
+> **Local app:** U-8 in full, question box included (F-9's swappable backend) —
+> the larger-view half ships at **S5**, the question box at **S5a** with F-9.
+> U-8 is therefore *partially* met at M1 by design, not by omission: S5's brief
+> deliberately excluded a placeholder box, because an affordance that cannot yet
+> work is worse than its absence.
+> **Exported HTML:** a tile opens to a larger view with its score, scale, date
+> and lat/lon — **no question box.** A VLM cannot run in a 16 MB offline file.
+> Do not render a disabled or placeholder question box in the export; an
+> affordance that cannot work is worse than its absence.
 
 ---
 
@@ -289,15 +585,20 @@ absent content is the failure mode this exposes.
 
 | Req | Proof |
 |---|---|
-| D-1 | `test_source_classifier` — exactly 2 of 31 leb rasters, by value inspection |
-| D-2 | `test_gsd_correction` — 10.47 cm/px, 46.91 m tile; rejects 12.5/56.0 |
+| F-0 | **SATISFIED at S0** — `briefs/S0_result.md`: candidate x query table, throughput, stated choice; PM re-ran 12/12 and re-read crops |
+| F-1a | `test_one_embedder_per_index` — manifest carries exactly one model id + revision; a build that would mix embedders raises |
+| F-2a | `test_pca_export_roundtrip` — basis stored and re-projectable; retrieval@10 overlap full-precision vs exported, **reported per scale** |
+| E-1a | by-eye vehicle verdict on saved top-10 crops (no labels exist; non-gating) |
+| F-11 | *optional (S8)* — same E-1 table for ColQwen2.5 side by side |
+| D-1 | `test_source_classifier` — the **indexable** pair exactly; `test_d1_pixel_rule_over_leb` — the **4-member** pixel-rule set exactly; both by value inspection, plus a renamed-symlink assertion |
+| D-2 | `test_gsd_correction` — 10.47 cm/px, 46.91 m tile; rejects 12.5/56.0; `test_gsd_no_correction_for_utm` — 10.00 cm, 44.80 m; `test_ground_resolution_geographic` — a real EPSG:4326 raster in metres, fails if degrees are returned; `test_gsd_guard_fires_on_secant_mercator` |
 | D-3 | `test_data_dir_readonly` — output paths + tree checksum unchanged |
 | D-4 | `test_tile_id_stable` — two builds, identical ids |
 | D-5 | U-5 copy assertion + spec review |
 | F-1 | `test_tiling_covers_extent` — zero gaps, count 1012 |
 | F-2 | `test_embed_unit_norm` — norms, dim, recorded model id |
 | F-3 | `test_text_embed_deterministic` |
-| F-4 | `test_cosine_ranking` — sorted, bounded, self-similarity 1.0 |
+| F-4 | `test_cosine_ranking` — sorted, bounded, self-similarity 1.0; `test_ranking_is_per_scale` — one ranking per scale, no cross-scale pooling |
 | F-5 | `test_index_roundtrip` — byte-identical results after reload |
 | F-6 | `test_aoi_filter` — single-tile bbox, empty bbox |
 | F-7 | `test_date_filter` — leb pool halves |
@@ -307,17 +608,27 @@ absent content is the failure mode this exposes.
 | N-1 | measured latency, pasted |
 | N-2 | build log: tiles/sec, wall time, resume |
 | N-3 | `test_dtype_and_cuda` |
-| N-4 | `test_embedding_determinism` |
+| N-4 | `test_embedding_determinism` (fixed batch size); `test_manifest_records_batch_size`; cross-batch deviation measured and reported, not asserted |
 | N-5 | `test_artifacts_gitignored` |
 | N-6 | `test_export_size_fails_loudly` |
 | N-7 | fresh-session cold start |
-| U-1..U-8 | adversarial UX review against the rendered export |
+| N-8 | `test_no_machine_paths` (grep of `src/`), `test_dtype_for_device` (cc<8 -> fp16, cc>=8 -> bf16, cpu -> fp32), `test_cpu_only_build`, `test_manifest_path_portable` |
+| N-9 | fresh session executes `INSTRUCTIONS.md` on a foreign machine and reports blockers; anything it asked = defect |
+| U-1..U-8 | adversarial UX review against the rendered export; U-3 additionally `test_confidence_band_is_relative` (no absolute cosine constant; bands from the stored background set) and `test_confidence_band_reproducible` (same band across processes). **Not** a pass/fail on separating present from absent — that was measured impossible |
 | E-1, E-2 | eval report, non-gating |
 
 **Value -> dependents** (re-verify these when the value changes):
 `TILE_PX` -> F-1 tile counts, D-2 ground extent, F-8 export size, E-1
 thresholds. `EMB_DTYPE` -> F-8 size, F-2/F-4 numeric tolerances.
 Embedder choice -> F-2 dimensionality, F-8 size, all of section 5.
+
+**Embedder changed at S0 (1280 -> 768). Dependents re-verified:** F-2
+dimensionality updated to 768. F-8 export size — *unaffected*: the export is
+PCA-reduced to `EXPORT_DIM`=128 before int8, so source dim never enters the
+budget, and headroom improves. Section 5 — structurally unaffected, but every
+number in it must be computed with RemoteCLIP, and S0's measured confusions
+(beige corrugated metal retrieved by `sand`; no attribute discrimination) are
+expected to appear there. F-4 numeric tolerances unchanged.
 
 ---
 
