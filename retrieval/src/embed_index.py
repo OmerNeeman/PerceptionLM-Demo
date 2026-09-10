@@ -5,13 +5,30 @@ on-disk index of unit-normalised, model-tagged vectors, using the S0-chosen
 embedder (``embedders.py``) through its public ``embed_images`` path only --
 pooled output, never patch tokens (settled, see spec F-2 and CLAUDE.md).
 
-Layout, one directory per AOI, everything gitignored under the index root::
+Layout, one directory per (model, AOI), everything gitignored under the
+index root::
 
-    <index_root>/emb/<aoi>/manifest.json   -- one model id, one revision,
-                                               one record per embedded tile
-                                               (tile_id, scale, nodata_fraction)
-    <index_root>/emb/<aoi>/vectors.npy     -- (n, dim) float16, row i is
-                                               manifest["tiles"][i]'s vector
+    <index_root>/emb/<model_id>/<aoi>/manifest.json  -- one model id, one
+                                               revision, one record per
+                                               embedded tile (tile_id, scale,
+                                               nodata_fraction)
+    <index_root>/emb/<model_id>/<aoi>/vectors.npy     -- (n, dim) float16,
+                                               row i is manifest["tiles"][i]'s
+                                               vector
+
+Model-scoped since S11a (briefs/S11a.md): the pre-S11a layout was
+``emb/<aoi>/``, which cannot hold two embedders' vectors for the same AOI at
+once. ``emb_dir``/``list_indexed_aois``/``load_index`` all take an optional
+``model_id`` (default ``DEFAULT_MODEL_ID``), so every pre-S11a call site --
+which never passed one -- keeps reading/writing exactly the RemoteCLIP index
+it always did, now at ``emb/RemoteCLIP-ViT-L-14/<aoi>/`` (moved there at
+S11a, not re-embedded: those 104,374 vectors cost real GPU time and are
+reused verbatim). ``build_index`` resolves which model's directory to use
+(the ``embedder`` argument's own ``model_id`` if one is passed, else the
+``model_id`` string argument) *before* touching disk, so a coexisting build
+for a second model never collides with the first by directory routing alone
+-- see the module's own MixedEmbedderError docs below for what guard remains
+once two different models physically cannot share a directory.
 
 The tile plan itself is **not** read from the on-disk
 ``index/tileplan/*.json`` files -- those are a shared side effect of S2's own
@@ -101,7 +118,19 @@ RAW_NORM_SANITY_ATOL = 1e-2
 
 class MixedEmbedderError(RuntimeError):
     """A build would append vectors from a different model id or revision
-    onto an existing index -- F-1a. Raised, never worked around."""
+    onto an existing index -- F-1a.
+
+    Since S11a's model-scoped layout, two genuinely different models never
+    reach this check via ordinary routing at all: `build_index` resolves
+    which model's directory to use before touching disk, so a second model
+    building at the same aoi+index_root lands in its own, separate directory
+    (that coexistence is the layout's whole point -- see the module
+    docstring). What still raises here is a directory whose on-disk manifest
+    disagrees with what a build for that exact directory is about to write
+    -- same model_id, different revision (the original case: a checkpoint
+    was silently swapped), or a manifest whose recorded model_id does not
+    match the directory it was found in (e.g. tampered/corrupted on disk).
+    Either way: raised, never worked around."""
 
 
 # --------------------------------------------------------------------------
@@ -109,23 +138,32 @@ class MixedEmbedderError(RuntimeError):
 # --------------------------------------------------------------------------
 
 
-def emb_dir(aoi: str, index_root: Path | None = None) -> Path:
+def emb_dir(aoi: str, index_root: Path | None = None, model_id: str = DEFAULT_MODEL_ID) -> Path:
+    """Model-scoped index directory for one AOI (S11a).
+
+    `model_id` defaults to `DEFAULT_MODEL_ID` (RemoteCLIP) so every call
+    site that predates S11a -- which never passed a third argument --
+    resolves to exactly the directory it always did, now nested one level
+    deeper under the model id.
+    """
     root = index_root or config.get_index_root()
-    return root / "emb" / aoi
+    return root / "emb" / model_id / aoi
 
 
 def _manifest_paths(aoi_dir: Path) -> tuple[Path, Path]:
     return aoi_dir / MANIFEST_NAME, aoi_dir / VECTORS_NAME
 
 
-def list_indexed_aois(index_root: Path | None = None) -> list[str]:
-    """Every AOI that has a complete on-disk index (`manifest.json` +
-    `vectors.npy` both present under `emb/<aoi>/`) -- brief S6, Part 3:
-    this is how the app discovers "all AOIs" without a hardcoded list, so a
-    later stage that indexes a ninth scene needs no app.py change. Sorted for
-    a stable, deterministic AOI-selector order."""
+def list_indexed_aois(index_root: Path | None = None, model_id: str = DEFAULT_MODEL_ID) -> list[str]:
+    """Every AOI that has a complete on-disk index for `model_id`
+    (`manifest.json` + `vectors.npy` both present under
+    `emb/<model_id>/<aoi>/`) -- brief S6, Part 3: this is how the app
+    discovers "all AOIs" without a hardcoded list, so a later stage that
+    indexes a ninth scene needs no app.py change. Sorted for a stable,
+    deterministic AOI-selector order. `model_id` defaults to
+    `DEFAULT_MODEL_ID`, matching every pre-S11a caller's expectations."""
     root = index_root or config.get_index_root()
-    emb_root = root / "emb"
+    emb_root = root / "emb" / model_id
     if not emb_root.exists():
         return []
     out = []
@@ -302,7 +340,14 @@ def build_index(
     """
     root = data_root or config.get_data_root()
     aoi = tiling.scene_aoi(rel_path)
-    aoi_dir = emb_dir(aoi, index_root)
+    # S11a: resolve which model this build is FOR before touching disk at
+    # all, so the model-scoped directory (emb_dir) is chosen correctly even
+    # when a caller passes a pre-loaded `embedder` for a model other than
+    # `model_id`'s default -- the embedder argument always wins, exactly as
+    # it did pre-S11a, just resolved earlier so routing sees it too.
+    if embedder is not None:
+        model_id = embedder.model_id
+    aoi_dir = emb_dir(aoi, index_root, model_id=model_id)
     aoi_dir.mkdir(parents=True, exist_ok=True)
     manifest_path, vectors_path = _manifest_paths(aoi_dir)
 
@@ -310,9 +355,6 @@ def build_index(
     planned_count = len(ordered_tiles)
 
     existing_manifest, existing_vectors = _load_state(manifest_path, vectors_path)
-
-    if embedder is not None:
-        model_id = embedder.model_id
 
     if existing_manifest is not None and existing_manifest["model_id"] != model_id:
         raise MixedEmbedderError(
@@ -446,10 +488,19 @@ def build_index(
 # --------------------------------------------------------------------------
 
 
-def load_index(aoi: str, index_root: Path | None = None, renormalize: bool = True) -> dict:
+def load_index(
+    aoi: str,
+    index_root: Path | None = None,
+    renormalize: bool = True,
+    model_id: str = DEFAULT_MODEL_ID,
+) -> dict:
     """Reload one AOI's index from disk -- the fresh-process verification
     path (F-2, F-5). Raises if the manifest and vectors.npy disagree on row
     count (an inconsistent index must never be loaded silently).
+
+    `model_id` (S11a) selects which model-scoped index to read; defaults to
+    `DEFAULT_MODEL_ID` so every pre-S11a caller reads exactly the RemoteCLIP
+    index it always did.
 
     `renormalize` (default True): fp16 storage of an fp32 unit vector does
     not generally satisfy ||v|| = 1.0 +/- 1e-5 on reload -- measured up to
@@ -470,7 +521,7 @@ def load_index(aoi: str, index_root: Path | None = None, renormalize: bool = Tru
     non-finite component always raises, naming the offending row indices and
     what was found -- never silently dropped, repaired, or renormalised.
     """
-    aoi_dir = emb_dir(aoi, index_root)
+    aoi_dir = emb_dir(aoi, index_root, model_id=model_id)
     manifest_path, vectors_path = _manifest_paths(aoi_dir)
     manifest = json.loads(manifest_path.read_text())
     vectors_raw = np.load(vectors_path)

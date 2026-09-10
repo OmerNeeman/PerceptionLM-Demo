@@ -165,23 +165,46 @@ def test_manifest_single_embedder(fixture_scene, real_embedder, tmp_path):
 
 
 def test_mixed_embedder_build_fails_loudly(fixture_scene, real_embedder, tmp_path):
+    """Case A below was rewritten at S11a (briefs/S11a.md): the index layout
+    became model-scoped (`emb/<model_id>/<aoi>/`, see embed_index.emb_dir),
+    specifically so a second model CAN be indexed for the same aoi+index_root
+    without colliding with the first -- that is the feature S11a adds, not a
+    bug. So "request a different model_id at an aoi+index_root that already
+    has an index" can no longer mean "silently corrupt/append" and must not
+    raise either; it now means "build a second, independent, coexisting
+    index," asserted here. The guard this case used to cover (a genuinely
+    different model ending up appended into ONE directory) is retargeted at
+    the layout's remaining collision surface -- see
+    test_pe_index.py::test_mixed_embedder_still_raises, which reproduces it
+    via a tampered on-disk manifest (the same technique Case B below already
+    used for a mismatched revision) and still raises, naming both values.
+    Case B itself is untouched: same model id -> same directory, still
+    collides exactly as before.
+    """
     data_root, rel = fixture_scene
 
-    # Case A: a different model id entirely -- rejected without even
-    # loading the new candidate (the string comparison alone must catch it).
+    # Case A (rewritten at S11a): a different model id entirely now builds a
+    # SEPARATE, coexisting index under its own model-scoped subdirectory --
+    # it must NOT raise, and the original RemoteCLIP index must be untouched.
     index_root_a = tmp_path / "index_a"
     embed_index.build_index(
         rel, scales=(112,), batch_size=8, data_root=data_root,
         index_root=index_root_a, embedder=real_embedder,
     )
-    with pytest.raises(embed_index.MixedEmbedderError) as exc_a:
-        embed_index.build_index(
-            rel, scales=(112,), batch_size=8, data_root=data_root,
-            index_root=index_root_a, model_id="PE-Core-L14-336",
-        )
-    msg_a = str(exc_a.value)
-    assert "RemoteCLIP-ViT-L-14" in msg_a
-    assert "PE-Core-L14-336" in msg_a
+    pe_report = embed_index.build_index(
+        rel, scales=(112,), batch_size=8, data_root=data_root,
+        index_root=index_root_a, model_id="PE-Core-L14-336",
+    )
+    assert pe_report["model_id"] == "PE-Core-L14-336"
+    rc_dir = embed_index.emb_dir("tiny_scene", index_root_a, model_id="RemoteCLIP-ViT-L-14")
+    pe_dir = embed_index.emb_dir("tiny_scene", index_root_a, model_id="PE-Core-L14-336")
+    assert rc_dir != pe_dir
+    assert json.loads((rc_dir / embed_index.MANIFEST_NAME).read_text())["model_id"] == (
+        "RemoteCLIP-ViT-L-14"
+    )
+    assert json.loads((pe_dir / embed_index.MANIFEST_NAME).read_text())["model_id"] == (
+        "PE-Core-L14-336"
+    )
 
     # Case B: same model id, a different (fabricated) revision.
     index_root_b = tmp_path / "index_b"

@@ -160,7 +160,27 @@ def test_load_corpus_multi_raises_on_mixed_embedders(real_embedder, tmp_path_fac
     """F-1a extended to the query side: combining two AOIs indexed with
     different embedders/revisions must raise loudly, never silently compare
     incompatible vector spaces (the same `MixedEmbedderError` `build_index`
-    itself raises -- reused, not reimplemented)."""
+    itself raises -- reused, not reimplemented).
+
+    S11a note: the index layout became model-scoped
+    (`emb/<model_id>/<aoi>/`), and `retrieve.load_corpus`/`load_corpus_multi`
+    were not touched by S11a (out of scope -- that is S11b's "selector"
+    job), so they still resolve every AOI through `embed_index.load_index`'s
+    *default* `model_id` (RemoteCLIP). Building `mixed_b` with `_FakeEmbedder`
+    now naturally routes it to its own `emb/fake-model/mixed_b/` directory
+    (S11a's whole point: two different models never collide), which
+    `load_corpus_multi`'s default-routed lookup for `mixed_b` would not even
+    find (`FileNotFoundError`, not `MixedEmbedderError` -- a real gap this
+    stage's layout change opened, flagged rather than silently patched by
+    widening scope into retrieve.py). To keep exercising the actual
+    assertion under test -- `load_corpus_multi` must catch two AOIs whose
+    *recorded* manifests disagree, not just AOIs that fail to resolve at
+    all -- `mixed_b`'s freshly-built manifest+vectors are relocated to where
+    default routing actually looks (`emb/RemoteCLIP-ViT-L-14/mixed_b/`) via
+    `embed_index.emb_dir`, exactly the on-disk-mismatch construction
+    `test_pe_index.py::test_mixed_embedder_still_raises` already uses for
+    the equivalent build-side guard.
+    """
     data_root = tmp_path_factory.mktemp("mixed_data")
     index_root = tmp_path_factory.mktemp("mixed_index")
     rel_a, rel_b = "mixed_a.tif", "mixed_b.tif"
@@ -187,6 +207,11 @@ def test_load_corpus_multi_raises_on_mixed_embedders(real_embedder, tmp_path_fac
     )
 
     aoi_a, aoi_b = tiling.scene_aoi(rel_a), tiling.scene_aoi(rel_b)
+    fake_dir = embed_index.emb_dir(aoi_b, index_root, model_id="fake-model")
+    default_dir = embed_index.emb_dir(aoi_b, index_root, model_id=embed_index.DEFAULT_MODEL_ID)
+    default_dir.parent.mkdir(parents=True, exist_ok=True)
+    fake_dir.rename(default_dir)
+
     with pytest.raises(embed_index.MixedEmbedderError):
         retrieve.load_corpus_multi([aoi_a, aoi_b], index_root=index_root, data_root=data_root)
 

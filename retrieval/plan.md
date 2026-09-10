@@ -189,7 +189,9 @@ never burn past it.
 | S6 | **GREEN** | all 8 scenes: 104,374 + 4,168 = **108,542** exact. `leb` splits 20,944/20,944 so F-7 halves precisely. N-1 **65.7 ms** end-to-end vs 200 ms. 237 tiles/sec | — |
 | S5b | **GREEN (handback unfinished)** | `export.html` **10.13 MB** / 16 MB cap, **zero external refs**, basemap + client-side crop, U-5 caveat intact. Agent died before the size table and ranking-parity check | PM to re-verify parity |
 | S5c | **GREEN** | export rebuilt: opens with results not a tag cloud; `leb` exportable at 128-d with a 24 px legibility floor. Both parity **1.000**, both zero external refs, 10.13 / 14.93 MiB | — |
-| polish | **not done** | agent died on the spend limit before starting | modal metadata, pyproj warning, S4 export-test hygiene, measured-RSS note |
+| S11a | **GREEN** | PE-Core-L14-336 indexed over the identical 104,374 tiles; model-scoped layout; RemoteCLIP moved not re-embedded. **171 tests.** S0's vehicle gap does not survive full scale (both 5/5); control margin shown to be an artifact of the control set | — |
+| S11b | **in flight** | model selector + side-by-side compare view | PM verification |
+| polish | **not done** |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 
 | M1 hand-over | pending | owner will explore the demo themselves once PM has verified it | after S5 |

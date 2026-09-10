@@ -1569,3 +1569,87 @@ rather than defects: the caveat is HTML-entity encoded (`&ndash;`), and the
 packed arrays use **mixed widths** — `int8` for source index, `int16` for pixel
 offsets. A negative result about an artifact is evidence about your reader
 before it is evidence about the file.
+
+---
+
+## s11a — 2026-09-10 — second index built; S0's quality claim does not survive full scale
+
+**Both models now index the identical corpus.** Layout is model-scoped —
+`index/emb/<model_id>/<aoi>/` — and the existing RemoteCLIP index was **moved,
+not re-embedded**. `emb_dir` / `list_indexed_aois` / `load_index` gained an
+optional `model_id` defaulting to RemoteCLIP, so every prior caller was
+unchanged.
+
+| | RemoteCLIP-ViT-L-14 | PE-Core-L14-336 |
+|---|---|---|
+| dim | 768 | 1024 |
+| vectors | 104,374 | 104,374 |
+| on disk | 165 MB | 216 MB |
+| throughput | 237 t/s | 74-79 t/s |
+
+**PM-verified, all 8 shards:** norms within **1.79e-07**, all finite, rows match
+manifests, and **tile-id sets identical — 104,374 both ways, zero difference in
+either direction.** A comparison across differing pools would measure the pools;
+this one doesn't.
+
+### FINDING — S0's vehicle-quality gap disappears at full scale
+
+S0 reported RemoteCLIP **4/5** genuine vehicle crops at 112 px against
+PE-Core-L14's **3/5**, measured over **336 crops from one 1792x1792 subregion**.
+
+Re-run over the real **7,322** tiles at 112 px on `X605_Y3388`, judged by eye:
+**both models return 5/5 real vehicles**, and **top-5 agreement is 0/5 on every
+query** — they retrieve entirely different, entirely correct tiles.
+
+*So S0's sample could not discriminate on this axis.* The choice of RemoteCLIP
+still stands, but the grounds change: **3x throughput and a better margin at
+112 px**, not better vehicle retrieval. Recorded because the earlier claim was
+repeated to the owner as settled.
+
+### FINDING — the control margin is an artifact of the control set
+
+S11a's worker measured PE-Core-L14's margin as **positive at every scale**,
+reversing S0. The PM measured **both models negative** at 112 px. Both are
+correct — the worker used `aircraft carrier` alone, as S0 did; the PM used three
+controls.
+
+| control set | RemoteCLIP @112 | PE-Core-L14 @112 |
+|---|---|---|
+| `aircraft carrier` only | positive | positive |
+| + `penguins`, `a ski slope` | **-0.0181** | **-0.0236** |
+
+`aircraft carrier` is semantically remote from anything in a tent camp, so
+everything clears it. `a ski slope` shares sand-and-slope texture and outranks
+a **real** query on both models.
+
+**The margin is a property of the chosen control, not of the model.** S0's
+headline — "+0.0135, the only candidate whose control is beaten by all 8 real
+queries" — was largely an artifact of a one-query control set. This independently
+strengthens the U-3 amendment: no threshold separates present from absent, and
+it now holds for **both** models.
+
+*Where both measurements agree:* PE Core is weaker at **112 px** specifically —
+the scale small objects live at.
+
+### INCIDENT — two processes wrote one index concurrently. The PM caused it.
+
+The agent returned `"Waiting."` as an entire handback after a task notification
+said it had stopped. The PM read that as a stalled stage with an orphaned child,
+and started driving the remaining build directly. **The agent was still alive and
+working.** For a few minutes two processes wrote `emb/PE-Core-L14-336/gaza/`.
+
+Each side saw the other as the intruder; the agent's handback describes "a
+second independent process from another live session", which was the PM.
+
+*No damage:* the PM killed both writers, and post-build verification found tile
+sets identical, all norms clean, rows matching manifests. The agent separately
+repaired a 2,149-tile gap using the existing resume logic.
+
+**Lesson, and it is the PM's:** a task notification saying an agent stopped is
+**not** proof its work stopped. Before taking over a stage, check for live
+processes (`pgrep -af`) *and* prefer resuming the agent over racing it. The
+resumability that made this recoverable (N-2) was designed for crashes and
+happened to cover a self-inflicted race.
+
+*Second-order lesson:* `pkill -f <pattern>` matched the PM's own shell twice,
+because the invoking command line contains the pattern. Kill by PID.
