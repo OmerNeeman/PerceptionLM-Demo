@@ -190,7 +190,7 @@ never burn past it.
 | S5b | **GREEN (handback unfinished)** | `export.html` **10.13 MB** / 16 MB cap, **zero external refs**, basemap + client-side crop, U-5 caveat intact. Agent died before the size table and ranking-parity check | PM to re-verify parity |
 | S5c | **GREEN** | export rebuilt: opens with results not a tag cloud; `leb` exportable at 128-d with a 24 px legibility floor. Both parity **1.000**, both zero external refs, 10.13 / 14.93 MiB | — |
 | S11a | **GREEN** | PE-Core-L14-336 indexed over the identical 104,374 tiles; model-scoped layout; RemoteCLIP moved not re-embedded. **171 tests.** S0's vehicle gap does not survive full scale (both 5/5); control margin shown to be an artifact of the control set | — |
-| S11b | **in flight** | model selector + side-by-side compare view | PM verification |
+| S11b | **GREEN** | selector + compare view. **188 tests.** F-1a enforced structurally; N-1 26/28 ms per model; both corpora 1,574 MiB, **~7.47 GiB with both embedders warm** | — |
 | polish | **not done** |
 | S1a | **queued** | added at owner request; portability audit found `float16` and the data root hardcoded | brief + dispatch after S1 gates |
 

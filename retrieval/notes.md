@@ -1653,3 +1653,70 @@ happened to cover a self-inflicted race.
 
 *Second-order lesson:* `pkill -f <pattern>` matched the PM's own shell twice,
 because the invoking command line contains the pattern. Kill by PID.
+
+---
+
+## s11b — 2026-09-10 — the model selector works, and it exposes something worth seeing
+
+**188 tests.** Selector plus a side-by-side compare view; both indexes intact at
+104,374 each; tile plan intact.
+
+### F-1a enforced structurally, not by convention
+
+`Engine.run_compare` calls `run_query` **once per model into separate buckets**.
+Nothing concatenates, sorts or compares two models' results — verified by tests
+that reproduce every displayed score with a direct dot product against that
+model's *own* vectors. The only concatenation in the codebase is across **AOIs
+within one model** (`load_corpus_multi`), which already raises on mixed
+embedders.
+
+The UI says so three times, because a two-column layout invites exactly the
+comparison that is invalid: *"scores are only meaningful within one model's own
+column — RemoteCLIP's and PE Core's scores are not on the same scale and were
+never meant to be compared to each other."*
+
+### The band copy is the U-3 amendment, rendered honestly
+
+> *"It is not a presence/absence verdict: on this corpus no statistic reliably
+> separates present from absent queries — a low band can still be a real hit,
+> and a high band is not a guarantee. Results are never hidden or reordered by
+> it."*
+
+That is the finding stated to the user rather than buried in a log, which is
+what U-5's honesty requirement was for.
+
+### Volunteered, not asked for
+
+The worker added a note that a 448 px tile is **44.80 m** across in the UTM
+scenes and **46.91 m** in `leb` — a 4.7% difference — so cross-AOI ranking
+remains valid (one embedder, one space) but tile footprints are not identical
+ground area. Nobody briefed that; it is correct and it prevents a real
+misreading.
+
+### Numbers
+
+| | |
+|---|---|
+| N-1 per model | **26 ms** / **28 ms** vs 200 ms budget |
+| full compare, 3 scales | 132-153 ms |
+| both corpora resident | 1,574 MiB |
+| **both GPU embedders warm** | **~7.47 GiB** |
+
+That last figure was flagged unprompted — the brief only asked about corpus
+RSS. It is ~5x the single-model footprint and is the number that decides
+whether this runs on a smaller machine. Fine on a 24 GiB card; recorded because
+`INSTRUCTIONS.md` currently quotes 1.4 GB.
+
+### One real bug caught by abuse-testing, not by tests
+
+An unknown AOI was silently downgraded to "both models unavailable" with a
+**200** instead of a clean **422**. Found by using the app as a confused user —
+the same method that has now caught defects at S3, S5 and here. A
+model/AOI pair with no index degrades that one column to `available: false`
+rather than failing the request.
+
+### Also built
+
+PE-Core-L14-336's background reference set for all 4 AOIs, at the model-scoped
+path — without it that model's confidence bands could not be computed at all.
+Explicitly never under `index/export/`.

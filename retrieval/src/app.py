@@ -122,12 +122,47 @@ CONFIDENCE_EXPLAINER = (
 #: cross-row comparison".
 CROSS_ROW_CAVEAT = "Scores are only meaningful within one scale's row — never compare scores across rows."
 
+#: S11b -- F-1a's UI constraint, stated for the compare view the same way
+#: CROSS_ROW_CAVEAT states it for scales: different models occupy different
+#: embedding spaces at different scales, so a score from one model's column
+#: means nothing next to a score from another model's column.
+CROSS_MODEL_CAVEAT = (
+    "In compare view, scores are only meaningful within one model's own column "
+    "— RemoteCLIP's and PE Core's scores are not on the same scale and were "
+    "never meant to be compared to each other."
+)
+
 DEMO_AOI = "X605_Y3388"
 
 #: Part 3 (brief S6) -- the AOI-selector sentinel meaning "search every
 #: indexed AOI at once", never a real AOI name (`embed_index.list_indexed_aois`
 #: only ever returns real ones, so this can never collide with one).
 ALL_AOIS = "all"
+
+# --------------------------------------------------------------------------
+# S11b -- model selector + compare view. Spec F-1a expressed in the UI:
+# scores from two models occupy different spaces and are never comparable,
+# so this app never merges, interleaves or jointly ranks results from two
+# models, and never renders a "winner" computed from raw scores. See
+# `Engine.run_compare` / `answer_compare` for where that constraint is
+# actually enforced in code, not just in this comment.
+# --------------------------------------------------------------------------
+
+#: Models this app can query or compare, in display/default order. Index 0
+#: is the shipped default (RemoteCLIP -- S0's measured winner, CLAUDE.md);
+#: a default single-model view has to start somewhere, which is a UX
+#: convenience, not a "which model is better" claim -- that claim is exactly
+#: what this stage refuses to make (see the module-level note above).
+COMPARE_MODELS: tuple[str, ...] = (embed_index.DEFAULT_MODEL_ID, "PE-Core-L14-336")
+
+
+def model_label(model_id: str) -> str:
+    """`RemoteCLIP-ViT-L-14 · 768-d` -- dimensionality read from
+    `embedders.CANDIDATES`, never a hardcoded literal (the same "derive it,
+    don't type it" discipline `Engine.ground_extent_note` already uses for
+    true ground extent)."""
+    dim = embedders.CANDIDATES[model_id].dim
+    return f"{model_id} · {dim}-d"
 
 MAX_QUERY_CHARS = 2000  # generous; the 500-char abuse case is well inside this
 MAX_THUMB_PX = 512
@@ -169,101 +204,194 @@ class _quiet_open_clip_warning:
 
 
 class Engine:
-    """Holds one AOI's loaded corpus/background/embedder.
+    """Holds every model's loaded corpora/backgrounds for this process, plus
+    lazily-loaded embedders per model.
 
     A single `threading.Lock` serialises every embedder call (text
-    tokenize + GPU forward pass): FastAPI's sync routes run in a thread
-    pool, and this project has never verified concurrent GPU calls through
-    this exact loader are safe -- serialising is cheap for a local,
-    single-user demo and removes the question entirely (this is also what
-    keeps "rapid repeated submits" -- one of the brief's own abuse cases --
-    from racing a half-initialised `self.embedder`).
+    tokenize + GPU forward pass) *and* every model's lazy load, across every
+    model: FastAPI's sync routes run in a thread pool, and this project has
+    never verified concurrent GPU calls through this exact loader are safe --
+    serialising is cheap for a local, single-user demo and removes the
+    question entirely (this is also what keeps "rapid repeated submits" --
+    one of the brief's own abuse cases -- from racing a half-initialised
+    embedder). Two models never run a forward pass at once as a result, which
+    is a latency cost the compare view's own N-1 measurement accounts for
+    (see `run_compare`'s docstring), not a correctness one.
     """
 
-    def __init__(self, aoi: str = DEMO_AOI, index_root: Path | None = None, data_root: Path | None = None):
+    def __init__(
+        self,
+        aoi: str = DEMO_AOI,
+        index_root: Path | None = None,
+        data_root: Path | None = None,
+        models: Sequence[str] = COMPARE_MODELS,
+    ):
         """`aoi` is the *default* selected AOI (Part 3: "defaulting to one
         AOI rather than everything, so results stay interpretable") -- not
-        the only one this Engine can serve. Every AOI with a complete
-        on-disk index under `index_root` (`embed_index.list_indexed_aois`) is
-        discovered and its corpus/background loaded eagerly here, alongside
-        `aoi` itself if for some reason it is not otherwise discovered (e.g.
-        a fixture index that predates `list_indexed_aois`, or `aoi` was
+        the only one this Engine can serve. `models` (S11b) is every model
+        this Engine can query or compare; `models[0]` is the default model
+        (S0's shipped choice).
+
+        For the **default model**, every AOI with a complete on-disk index
+        under `index_root` (`embed_index.list_indexed_aois`) is discovered
+        and its corpus/background loaded eagerly here, alongside `aoi`
+        itself if for some reason it is not otherwise discovered (e.g. a
+        fixture index that predates `list_indexed_aois`, or `aoi` was
         renamed on disk) -- this keeps the pre-S6 single-AOI call signature
-        (`Engine(aoi=..., index_root=..., data_root=...)`) working unchanged
-        for a single-AOI index, since discovery then finds exactly that one
-        AOI and every existing caller/test still gets the same behaviour.
+        (`Engine(aoi=..., index_root=..., data_root=...)`) working unchanged,
+        including its exact failure mode (`FileNotFoundError` propagates
+        uncaught if `aoi` itself has no default-model index -- never
+        silently skipped) since discovery then finds exactly that one AOI
+        and every existing caller/test still gets the same behaviour.
+
+        For every **other** model (S11b), AOI discovery and loading is
+        independent and forgiving: a model can legitimately lack an index
+        for an AOI the default model has (or have extra AOIs the default
+        model lacks) -- see `briefs/S11b.md`'s "switch to a model whose
+        index is missing for that AOI" abuse case. A missing (model, AOI)
+        index is logged and skipped here, never raised at startup; it
+        surfaces later, cleanly, from `get_corpus`/`get_background` only if
+        that exact combination is actually requested.
+
         F-5's < 5 s budget covers this whole eager load, not just one AOI's
         (measured on the real 4-AOI production index: well under a second
-        total -- see briefs/S6_result.md).
+        total -- see briefs/S6_result.md). Eagerly loading a second model's
+        corpora roughly doubles the vector memory (measured, not assumed --
+        see `briefs/S11b_result.md`'s peak-RSS figure) but stays well within
+        that budget; embedders themselves (the GPU-resident part) remain
+        lazy per model exactly as before, so opening the app never pays for
+        a model the user never selects.
         """
         self.aoi = aoi
         self.index_root = index_root
         self.data_root = data_root
+        self.models: tuple[str, ...] = tuple(models)
+        self.default_model: str = self.models[0]
         self._lock = threading.Lock()
 
-        discovered = embed_index.list_indexed_aois(index_root)
+        discovered = embed_index.list_indexed_aois(index_root, model_id=self.default_model)
         self.available_aois: list[str] = sorted(set(discovered) | {aoi})
 
-        self._corpora: dict[str, retrieve.Corpus] = {}
-        self._backgrounds: dict[str, dict[int, Sequence[float]] | None] = {}
+        # Keyed (model_id, aoi) -- see class docstring for why the default
+        # model's loop is strict (propagates FileNotFoundError) while every
+        # other model's is forgiving.
+        self._corpora: dict[tuple[str, str], retrieve.Corpus] = {}
+        self._backgrounds: dict[tuple[str, str], dict[int, Sequence[float]] | None] = {}
+        self._model_aois: dict[str, list[str]] = {self.default_model: list(self.available_aois)}
+
         for a in self.available_aois:
-            self._corpora[a] = retrieve.load_corpus(a, index_root=index_root, data_root=data_root)
-            try:
-                self._backgrounds[a] = retrieve.load_background(a, index_root=index_root)["scores_by_scale"]
-            except FileNotFoundError:
-                log.warning(
-                    "app: no background reference set found for %s -- confidence bands will read 'unknown'", a
-                )
-                self._backgrounds[a] = None
+            self._corpora[(self.default_model, a)] = retrieve.load_corpus(
+                a, index_root=index_root, data_root=data_root, model_id=self.default_model
+            )
+            self._backgrounds[(self.default_model, a)] = self._try_load_background(
+                a, self.default_model
+            )
+
+        for m in self.models[1:]:
+            found: list[str] = []
+            for a in sorted(embed_index.list_indexed_aois(index_root, model_id=m)):
+                try:
+                    self._corpora[(m, a)] = retrieve.load_corpus(
+                        a, index_root=index_root, data_root=data_root, model_id=m
+                    )
+                except FileNotFoundError:
+                    log.warning("app: no on-disk index for model=%s aoi=%s -- skipping (not an error)", m, a)
+                    continue
+                found.append(a)
+                self._backgrounds[(m, a)] = self._try_load_background(a, m)
+            self._model_aois[m] = found
 
         # Kept as plain attributes (not methods) for backward compatibility --
         # every pre-S6 caller/test reads `engine.corpus` / `engine.background`
-        # directly, meaning "the default AOI's corpus/background". They are
-        # fixed at construction time, never mutated by a later per-query `aoi`
-        # argument (concurrent requests may select different AOIs; Engine
-        # itself carries no "currently selected AOI" mutable state).
-        self.corpus: retrieve.Corpus = self._corpora[aoi]
-        self.background: dict[int, Sequence[float]] | None = self._backgrounds[aoi]
+        # directly, meaning "the default model's default AOI's corpus/
+        # background". They are fixed at construction time, never mutated by
+        # a later per-query `aoi`/`model_id` argument (concurrent requests
+        # may select different AOIs/models; Engine itself carries no
+        # "currently selected" mutable state).
+        self.corpus: retrieve.Corpus = self._corpora[(self.default_model, aoi)]
+        self.background: dict[int, Sequence[float]] | None = self._backgrounds[(self.default_model, aoi)]
 
-        self._all_corpus: retrieve.Corpus | None = None  # built lazily -- see get_corpus
-        self.embedder = None  # lazy -- see class docstring
+        self._all_corpus: dict[str, retrieve.Corpus] = {}  # built lazily per model -- see get_corpus
+        self.embedders: dict[str, object] = {}  # lazy per model -- see class docstring
         self._available_dates_by_aoi: dict[str, list[str]] = {
             a: sorted({loc["date"] for loc in c.locations.values() if loc["date"] != "unknown"})
-            for a, c in self._corpora.items()
+            for a, c in ((a, self._corpora[(self.default_model, a)]) for a in self.available_aois)
         }
 
-    def get_corpus(self, aoi: str | None) -> retrieve.Corpus:
-        """The corpus for one selected AOI, or the `ALL_AOIS` sentinel for
-        every indexed AOI concatenated (Part 3). The combined corpus is built
-        once, lazily, and cached -- most sessions never ask for it, and
-        building it eagerly for every Engine would spend F-5's budget on a
-        view most queries do not use."""
-        aoi = aoi or self.aoi
-        if aoi == ALL_AOIS:
-            if self._all_corpus is None:
-                with self._lock:
-                    if self._all_corpus is None:
-                        self._all_corpus = retrieve.load_corpus_multi(
-                            self.available_aois, index_root=self.index_root, data_root=self.data_root
-                        )
-            return self._all_corpus
-        if aoi not in self._corpora:
-            raise ValueError(
-                f"unknown AOI {aoi!r} -- available: {self.available_aois + [ALL_AOIS]}"
-            )
-        return self._corpora[aoi]
+    @property
+    def embedder(self):
+        """Backward-compat (pre-S11b): the *default* model's lazily-loaded
+        embedder, or `None` if not yet loaded. `self.embedders` (S11b) is the
+        per-model dict this now actually tracks; every pre-S11b caller reads
+        this singular property and means "the one model this Engine had"."""
+        return self.embedders.get(self.default_model)
 
-    def get_background(self, aoi: str | None) -> dict[int, Sequence[float]] | None:
-        """Confidence-band background for one selected AOI. `ALL_AOIS` has no
-        combined background reference set (unspecified by the brief; building
-        one would need its own calibration, not just a concatenation) --
-        `retrieve.confidence_band` already handles `None` by reporting
-        `band: "unknown"` rather than raising, so this is an honest omission,
-        not a broken path."""
+    def _known_aois(self) -> set[str]:
+        """Every AOI known to *any* model this Engine has -- used by
+        `run_compare` to tell "this specific model lacks this AOI" (a
+        legitimate per-model gap) apart from "this AOI does not exist at
+        all" (a real error, same as an unknown AOI on a single-model
+        query)."""
+        known: set[str] = set()
+        for aois in self._model_aois.values():
+            known.update(aois)
+        return known
+
+    def _try_load_background(self, aoi: str, model_id: str) -> dict[int, Sequence[float]] | None:
+        try:
+            return retrieve.load_background(aoi, index_root=self.index_root, model_id=model_id)["scores_by_scale"]
+        except FileNotFoundError:
+            log.warning(
+                "app: no background reference set found for model=%s aoi=%s -- confidence bands will read 'unknown'",
+                model_id, aoi,
+            )
+            return None
+
+    def get_corpus(self, aoi: str | None, model_id: str | None = None) -> retrieve.Corpus:
+        """The corpus for one selected (model, AOI) pair, or the `ALL_AOIS`
+        sentinel for every indexed AOI *of that model* concatenated (Part 3).
+        The combined corpus is built once per model, lazily, and cached --
+        most sessions never ask for it, and building it eagerly for every
+        model would spend F-5's budget on a view most queries do not use.
+
+        `model_id` (S11b) defaults to `self.default_model`, so every pre-S11b
+        caller (which never passed a second argument) keeps reading exactly
+        the default model's corpus it always did.
+        """
         aoi = aoi or self.aoi
+        model_id = model_id or self.default_model
+        if model_id not in self.models:
+            raise ValueError(f"unknown model {model_id!r} -- available: {list(self.models)}")
+        if aoi == ALL_AOIS:
+            if model_id not in self._all_corpus:
+                with self._lock:
+                    if model_id not in self._all_corpus:
+                        self._all_corpus[model_id] = retrieve.load_corpus_multi(
+                            self._model_aois.get(model_id, []),
+                            index_root=self.index_root, data_root=self.data_root, model_id=model_id,
+                        )
+            return self._all_corpus[model_id]
+        key = (model_id, aoi)
+        if key not in self._corpora:
+            raise ValueError(
+                f"no index for model={model_id!r} aoi={aoi!r} -- AOIs indexed for this model: "
+                f"{self._model_aois.get(model_id, [])}"
+            )
+        return self._corpora[key]
+
+    def get_background(self, aoi: str | None, model_id: str | None = None) -> dict[int, Sequence[float]] | None:
+        """Confidence-band background for one selected (model, AOI) pair.
+        `ALL_AOIS` has no combined background reference set (unspecified by
+        the brief; building one would need its own calibration, not just a
+        concatenation) -- `retrieve.confidence_band` already handles `None`
+        by reporting `band: "unknown"` rather than raising, so this is an
+        honest omission, not a broken path. Likewise for a (model, AOI) pair
+        whose background was never built."""
+        aoi = aoi or self.aoi
+        model_id = model_id or self.default_model
         if aoi == ALL_AOIS:
             return None
-        return self._backgrounds.get(aoi)
+        return self._backgrounds.get((model_id, aoi))
 
     def available_dates(self, aoi: str | None = None) -> list[str]:
         aoi = aoi or self.aoi
@@ -280,9 +408,14 @@ class Engine:
         `ground_extent_m` (itself sourced from `geo.py`, never hardcoded
         here), not typed as a literal. Returns None when every indexed AOI
         happens to share the same true GSD (e.g. a single-AOI fixture index),
-        since there is then nothing to caveat."""
+        since there is then nothing to caveat.
+
+        Purely geometric (CRS/GSD), not a function of which model embedded
+        the tiles -- so this reads only the default model's corpora, exactly
+        as before S11b; a second model over the same on-disk tiles would
+        report identical ground extents and add nothing here."""
         scale = tiling.SCALES[0]
-        extents = {a: c.ground_extent_m.get(scale) for a, c in self._corpora.items()}
+        extents = {a: self._corpora[(self.default_model, a)].ground_extent_m.get(scale) for a in self.available_aois}
         distinct = sorted({round(v, 2) for v in extents.values() if v is not None})
         if len(distinct) <= 1:
             return None
@@ -297,33 +430,47 @@ class Engine:
             f"footprints are not identical ground area."
         )
 
-    def get_embedder(self) -> tuple[object, bool, float]:
-        """Returns (embedder, was_just_loaded, load_ms). Thread-safe,
-        idempotent -- a second caller while another thread is mid-load
-        simply waits on the lock and then sees the already-loaded embedder
-        (load_ms 0.0, was_just_loaded False)."""
+    def get_embedder(self, model_id: str | None = None) -> tuple[object, bool, float]:
+        """Returns (embedder, was_just_loaded, load_ms) for one model.
+        Thread-safe, idempotent -- a second caller while another thread is
+        mid-load simply waits on the lock and then sees the already-loaded
+        embedder (load_ms 0.0, was_just_loaded False).
+
+        `model_id` (S11b) defaults to `self.default_model`, so every pre-S11b
+        caller keeps loading exactly the model it always did."""
+        model_id = model_id or self.default_model
+        if model_id not in self.models:
+            raise ValueError(f"unknown model {model_id!r} -- available: {list(self.models)}")
         with self._lock:
-            if self.embedder is not None:
-                return self.embedder, False, 0.0
+            if model_id in self.embedders:
+                return self.embedders[model_id], False, 0.0
             t0 = time.perf_counter()
             with _quiet_open_clip_warning():
-                self.embedder = embedders.load_embedder(embed_index.DEFAULT_MODEL_ID)
+                emb = embedders.load_embedder(model_id)
             load_ms = (time.perf_counter() - t0) * 1000.0
-            log.info("app: embedder loaded in %.1f ms", load_ms)
-            return self.embedder, True, load_ms
+            self.embedders[model_id] = emb
+            log.info("app: embedder %s loaded in %.1f ms", model_id, load_ms)
+            return emb, True, load_ms
 
     def run_query(
-        self, text: str, *, aoi: str | None = None, bbox=None, date=None, top_k: int = retrieve.TOP_K
+        self,
+        text: str,
+        *,
+        aoi: str | None = None,
+        bbox=None,
+        date=None,
+        top_k: int = retrieve.TOP_K,
+        model_id: str | None = None,
     ) -> dict:
-        with self._lock:
-            embedder, warm_up, model_load_ms = (self.embedder, False, 0.0)
-        if embedder is None:
-            embedder, warm_up, model_load_ms = self.get_embedder()
+        model_id = model_id or self.default_model
+        embedder, warm_up, model_load_ms = self.get_embedder(model_id)  # raises ValueError on an unknown model
 
         selected_aoi = aoi or self.aoi
-        base_corpus = self.get_corpus(selected_aoi)  # raises ValueError on an unknown AOI -- never silently ignored
+        base_corpus = self.get_corpus(
+            selected_aoi, model_id=model_id
+        )  # raises ValueError on an unknown AOI or missing (model, AOI) index -- never silently ignored
         corpus = filter_corpus_by_date(base_corpus, date)
-        background = self.get_background(selected_aoi)
+        background = self.get_background(selected_aoi, model_id=model_id)
         t0 = time.perf_counter()
         with self._lock:
             qvec = retrieve.embed_query(text, embedder=embedder)
@@ -336,6 +483,8 @@ class Engine:
         return {
             "query": text,
             "aoi": selected_aoi,
+            "model_id": model_id,
+            "model_label": model_label(model_id),
             "rankings": out["rankings"],
             "timing": {
                 "model_load_ms": round(model_load_ms, 1),
@@ -345,6 +494,65 @@ class Engine:
                 "warm_up": warm_up,
             },
         }
+
+    def run_compare(
+        self,
+        text: str,
+        *,
+        aoi: str | None = None,
+        bbox=None,
+        date=None,
+        top_k: int = retrieve.TOP_K,
+        models: Sequence[str] | None = None,
+    ) -> dict:
+        """S11b -- the same query, same AOI/bbox/date filters, run
+        **independently** against every model in `models` (default:
+        `self.models`, i.e. every model this Engine knows). Returns
+        ``{"query": text, "aoi": ..., "models": {model_id: <run_query's own
+        result dict, or an "unavailable" stub>, ...}}``.
+
+        This is the one place F-1a's UI constraint (module docstring: never
+        merge, interleave or jointly rank two models' results) has to be
+        actively honoured, not just assumed -- and the way it is honoured is
+        structural: each model's ranking comes from its own, independent
+        `run_query` call, kept in its own bucket of the returned dict. No
+        step here ever concatenates, sorts, or compares two models' `results`
+        lists or `score` values against each other -- see
+        `test_no_cross_model_merging`.
+
+        A model with no index for `aoi`, where `aoi` is otherwise real (known
+        to at least one model this Engine has), does not fail the whole
+        comparison -- its entry reports ``{"available": False, ...}``
+        instead, so one model's missing data never 500s the other model's
+        genuinely-available column (the compare view's own version of
+        "switch to a model whose index is missing for that AOI", handled
+        without a stack trace).
+
+        An `aoi` unknown to *every* model, however, still raises `ValueError`
+        up front -- exactly like `get_corpus` does for a single-model query
+        -- rather than quietly reporting every model as "unavailable"; a
+        typo'd AOI is a real error, not a legitimate per-model gap, and
+        deserves the same clean 422 a single-model query already gets for it.
+        """
+        selected_aoi = aoi or self.aoi
+        if selected_aoi != ALL_AOIS and selected_aoi not in self._known_aois():
+            raise ValueError(
+                f"unknown AOI {selected_aoi!r} -- available: {sorted(self._known_aois())} (or {ALL_AOIS!r})"
+            )
+        chosen = tuple(models) if models else self.models
+        out: dict[str, dict] = {}
+        for m in chosen:
+            try:
+                out[m] = self.run_query(text, aoi=aoi, bbox=bbox, date=date, top_k=top_k, model_id=m)
+                out[m]["available"] = True
+            except ValueError as exc:
+                out[m] = {
+                    "available": False,
+                    "model_id": m,
+                    "model_label": model_label(m),
+                    "error": str(exc),
+                }
+        return {"query": text, "aoi": aoi or self.aoi, "models": out}
 
 
 # --------------------------------------------------------------------------
@@ -402,7 +610,14 @@ def enrich_result(res: dict) -> dict:
 
 
 def answer_query(
-    engine: Engine, text: str, *, aoi: str | None = None, bbox=None, date=None, top_k: int = retrieve.TOP_K
+    engine: Engine,
+    text: str,
+    *,
+    aoi: str | None = None,
+    bbox=None,
+    date=None,
+    top_k: int = retrieve.TOP_K,
+    model_id: str | None = None,
 ) -> dict:
     """The full app-level answer to one query: validated empty/whitespace
     handling, then `Engine.run_query`, then display enrichment. Never raises
@@ -413,19 +628,26 @@ def answer_query(
     name restricts candidates to it; `ALL_AOIS` spans every indexed AOI.
     An unknown AOI name still raises (via `Engine.get_corpus`) rather than
     silently falling back to the default -- a filter that silently does
-    nothing is worse than one that fails loudly."""
+    nothing is worse than one that fails loudly.
+
+    `model_id` (S11b): `None` means the engine's own default model
+    (RemoteCLIP); a real model id switches which index answers this one
+    query. An unknown model id, or a model with no index for `aoi`, raises
+    the same way an unknown AOI does (via `Engine.get_corpus`/`get_embedder`)."""
     stripped = text.strip()
     if not stripped:
         return {
             "query": text,
             "aoi": aoi or engine.aoi,
+            "model_id": model_id or engine.default_model,
+            "model_label": model_label(model_id or engine.default_model),
             "empty": True,
             "message": "Type a description, or click one of the examples above.",
             "rankings": {},
             "timing": {"model_load_ms": 0.0, "embed_ms": 0.0, "search_ms": 0.0, "total_ms": 0.0, "warm_up": False},
         }
     truncated = stripped[:MAX_QUERY_CHARS]
-    out = engine.run_query(truncated, aoi=aoi, bbox=bbox, date=date, top_k=top_k)
+    out = engine.run_query(truncated, aoi=aoi, bbox=bbox, date=date, top_k=top_k, model_id=model_id)
     rankings = {}
     for scale, ranking in out["rankings"].items():
         rankings[scale] = {
@@ -433,6 +655,54 @@ def answer_query(
             "results": [enrich_result(r) for r in ranking["results"]],
         }
     out["rankings"] = rankings
+    out["empty"] = False
+    out["truncated"] = len(stripped) > MAX_QUERY_CHARS
+    return out
+
+
+def answer_compare(
+    engine: Engine,
+    text: str,
+    *,
+    aoi: str | None = None,
+    bbox=None,
+    date=None,
+    top_k: int = retrieve.TOP_K,
+    models: Sequence[str] | None = None,
+) -> dict:
+    """The full app-level answer to one compare-view query: the same query,
+    ranked independently through every model in `models` (default: every
+    model the engine knows), enriched for display exactly like
+    `answer_query` does per model -- **never merged, interleaved, or
+    re-ranked across models** (F-1a's UI constraint; see `Engine.run_compare`
+    and `test_no_cross_model_merging`).
+
+    Shape: ``{"query": ..., "aoi": ..., "empty": bool, "models": {model_id:
+    {"available": bool, "model_id", "model_label", "rankings": {scale: {...,
+    "results": [enriched...]}}, "timing": {...}} | {"available": False,
+    "model_id", "model_label", "error"}}}``.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return {
+            "query": text,
+            "aoi": aoi or engine.aoi,
+            "empty": True,
+            "message": "Type a description, or click one of the examples above.",
+            "models": {},
+        }
+    truncated = stripped[:MAX_QUERY_CHARS]
+    out = engine.run_compare(truncated, aoi=aoi, bbox=bbox, date=date, top_k=top_k, models=models)
+    models_out: dict[str, dict] = {}
+    for model_id, result in out["models"].items():
+        if not result.get("available", False):
+            models_out[model_id] = result
+            continue
+        rankings = {}
+        for scale, ranking in result["rankings"].items():
+            rankings[scale] = {**ranking, "results": [enrich_result(r) for r in ranking["results"]]}
+        models_out[model_id] = {**result, "rankings": rankings}
+    out["models"] = models_out
     out["empty"] = False
     out["truncated"] = len(stripped) > MAX_QUERY_CHARS
     return out
@@ -494,6 +764,13 @@ def _example_chips_html() -> str:
 def render_index_html(engine: Engine | None = None) -> str:
     default_aoi = engine.aoi if engine is not None else DEMO_AOI
     available_aois = engine.available_aois if engine is not None else [default_aoi]
+    models = engine.models if engine is not None else COMPARE_MODELS
+    default_model = engine.default_model if engine is not None else COMPARE_MODELS[0]
+    model_options = "".join(
+        f'<option value="{html_lib.escape(m)}"{" selected" if m == default_model else ""}>'
+        f'{html_lib.escape(model_label(m))}</option>'
+        for m in models
+    )
     dates = engine.available_dates(default_aoi) if engine is not None else []
     date_options = "".join(f'<option value="{html_lib.escape(d)}">{html_lib.escape(d)}</option>' for d in dates)
     date_disabled = "" if dates else "disabled"
@@ -581,6 +858,16 @@ def render_index_html(engine: Engine | None = None) -> str:
       </select>
       <p id="date-note" class="muted small">{date_note}</p>
     </fieldset>
+    <fieldset>
+      <legend>Model</legend>
+      <select id="model-select">
+        {model_options}
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>Compare</legend>
+      <label><input type="checkbox" id="compare-toggle"> Compare models side by side</label>
+    </fieldset>
     <button type="button" id="clear-filters" class="secondary">Clear filters</button>
   </div>
   <div id="active-filters" class="active-filters muted small" aria-live="polite"></div>
@@ -590,6 +877,7 @@ def render_index_html(engine: Engine | None = None) -> str:
 
 <section id="notes" class="muted small">
   <p>{html_lib.escape(CROSS_ROW_CAVEAT)}</p>
+  <p>{html_lib.escape(CROSS_MODEL_CAVEAT)}</p>
   <p>{html_lib.escape(CONFIDENCE_EXPLAINER)}</p>
   {extent_note_html}
 </section>
@@ -674,6 +962,13 @@ fieldset { border: 1px solid #ccc; border-radius: 6px; padding: 0.5rem; }
 .tile-meta { padding: 0.35rem 0.5rem; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .tile-meta .score { font-weight: 600; }
 .empty-row { color: #666; font-style: italic; }
+.compare-columns {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start;
+}
+@media (max-width: 700px) { .compare-columns { grid-template-columns: 1fr; } }
+.compare-col { border: 1px solid #ccc; border-radius: 6px; padding: 0.6rem; min-width: 0; }
+.compare-col h3 { margin: 0 0 0.2rem 0; font-size: 0.95rem; }
+@media (prefers-color-scheme: dark) { .compare-col { border-color: #444; } }
 .modal.hidden { display: none; }
 .modal {
   position: fixed; inset: 0; background: rgba(0,0,0,0.6);
@@ -707,6 +1002,8 @@ const datesByAoi = JSON.parse(document.getElementById('aoi-dates-data').textCont
 const state = {
   bbox: null, date: "",
   aoi: document.getElementById('aoi-select').value,
+  modelId: document.getElementById('model-select').value,
+  compare: false,
   lastQuery: document.getElementById('query-input').value,
 };
 
@@ -719,13 +1016,17 @@ async function runQuery(text) {
   state.lastQuery = text;
   const statusEl = document.getElementById('status');
   const resultsEl = document.getElementById('results');
-  statusEl.textContent = 'Searching… (first search can take ~10s while the model loads)';
+  statusEl.textContent = state.compare
+    ? 'Comparing… (first search for a given model can take ~10s while that model loads)'
+    : 'Searching… (first search for a given model can take ~10s while that model loads)';
   document.getElementById('search-btn').disabled = true;
   try {
     const body = { text, top_k: 10, aoi: state.aoi };
     if (state.bbox) body.bbox = state.bbox;
     if (state.date) body.date = state.date;
-    const resp = await fetch('/api/query', {
+    const endpoint = state.compare ? '/api/compare' : '/api/query';
+    if (!state.compare) body.model_id = state.modelId;
+    const resp = await fetch(endpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
     const data = await resp.json();
@@ -737,9 +1038,15 @@ async function runQuery(text) {
     renderResults(data);
     if (data.empty) {
       statusEl.textContent = data.message || '';
+    } else if (state.compare) {
+      const parts = Object.values(data.models).map((m) => {
+        if (m.available === false) return `${m.model_label}: no index for this AOI`;
+        return `${m.model_label}: ${m.timing.total_ms.toFixed(0)} ms`;
+      });
+      statusEl.textContent = `Comparing "${data.query}" — ` + parts.join(' · ');
     } else {
       const t = data.timing;
-      statusEl.textContent = `Query "${data.query}" — ${t.total_ms.toFixed(0)} ms` +
+      statusEl.textContent = `Query "${data.query}" [${data.model_label}] — ${t.total_ms.toFixed(0)} ms` +
         (t.warm_up ? ` (includes ${t.model_load_ms.toFixed(0)} ms model warm-up, first query only)` : '');
     }
   } catch (err) {
@@ -749,10 +1056,15 @@ async function runQuery(text) {
   }
 }
 
-function renderActiveFilters(resultCounts) {
+// U-6 -- active filters (AOI, bbox, date, model/compare) are always legible,
+// with the result count each produced, in one place. `modelChips` is
+// pre-built by the single-model / compare renderer below, since only they
+// know how many results *each model* actually produced (compare never
+// collapses two models' counts into one number -- that would already be a
+// small step toward the "which won" verdict this app must never show).
+function renderActiveFilters(modelChips) {
   const el = document.getElementById('active-filters');
-  const total = resultCounts ? Object.values(resultCounts).reduce((a,b) => a+b, 0) : 0;
-  const chips = [`<span class="filter-chip">AOI: ${state.aoi === 'all' ? 'All AOIs' : state.aoi} — ${total} result(s)</span>`];
+  const chips = [`<span class="filter-chip">AOI: ${state.aoi === 'all' ? 'All AOIs' : state.aoi}</span>`, ...modelChips];
   if (state.bbox) {
     chips.push(`<span class="filter-chip">bbox [${state.bbox.map(v => v.toFixed(4)).join(', ')}]</span>`);
   }
@@ -788,6 +1100,18 @@ function renderResults(data) {
   const el = document.getElementById('results');
   el.innerHTML = '';
   if (data.empty) return;
+  // S11b: dispatch on payload shape (`data.models` only exists on an
+  // /api/compare response) rather than on `state.compare` -- the renderer
+  // reflects what the server actually answered, not what the toggle happens
+  // to say right now (avoids ever painting a compare response into the
+  // single-column layout, or vice versa, if a stale response lands after a
+  // fast toggle).
+  if (data.models) { renderCompareResults(data); return; }
+  renderSingleResults(data);
+}
+
+function renderSingleResults(data) {
+  const el = document.getElementById('results');
   const counts = {};
   const scales = Object.keys(data.rankings).map(Number).sort((a, b) => b - a);
   for (const scale of scales) {
@@ -799,7 +1123,7 @@ function renderResults(data) {
     const conf = row.confidence || { band: 'unknown', message: '' };
     section.innerHTML = `
       <h2>${scale}px tile &mdash; ${extent} m true ground extent</h2>
-      <p class="scale-caption">${data.rankings[scale].results.length} result(s) at this scale. Scores are only comparable within this row.</p>
+      <p class="scale-caption">${row.results.length} result(s) at this scale. Scores are only comparable within this row.</p>
       <span class="confidence-band ${conf.band}">confidence: ${conf.band}${conf.percentile != null ? ' (' + conf.percentile.toFixed(0) + 'th pct.)' : ''}</span>
       <p class="confidence-explainer">${conf.message}</p>
       <div class="tile-grid" id="grid-${scale}"></div>
@@ -824,7 +1148,90 @@ function renderResults(data) {
       grid.appendChild(card);
     }
   }
-  renderActiveFilters(counts);
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  renderActiveFilters([`<span class="filter-chip">Model: ${data.model_label} — ${total} result(s)</span>`]);
+}
+
+// S11b -- the compare view: one query, both models, results in two columns
+// per scale row (never merged, interleaved or jointly ranked -- each
+// column's tile-grid is built from that model's own `rankings` only, and no
+// code path here ever reads one model's `results`/`score` while iterating
+// the other's).
+function renderCompareResults(data) {
+  const el = document.getElementById('results');
+  const modelIds = Object.keys(data.models);
+  const scaleSet = new Set();
+  for (const mid of modelIds) {
+    const m = data.models[mid];
+    if (m.available === false) continue;
+    Object.keys(m.rankings || {}).forEach(s => scaleSet.add(Number(s)));
+  }
+  const scales = [...scaleSet].sort((a, b) => b - a);
+  const perModelCounts = {};
+  for (const mid of modelIds) perModelCounts[mid] = 0;
+
+  for (const scale of scales) {
+    let extent = null;
+    for (const mid of modelIds) {
+      const m = data.models[mid];
+      if (m.available !== false && m.rankings[scale]) { extent = m.rankings[scale].ground_extent_m; break; }
+    }
+    const extentTxt = extent != null ? extent.toFixed(1) : '?';
+    const section = document.createElement('div');
+    section.className = 'scale-row';
+    section.innerHTML = `
+      <h2>${scale}px tile &mdash; ${extentTxt} m true ground extent</h2>
+      <p class="scale-caption">Same query, same scale, two independent models -- scores are only comparable within one column.</p>
+      <div class="compare-columns" id="compare-${scale}"></div>
+    `;
+    el.appendChild(section);
+    const wrap = section.querySelector(`#compare-${scale}`);
+    for (const mid of modelIds) {
+      const m = data.models[mid];
+      const col = document.createElement('div');
+      col.className = 'compare-col';
+      if (m.available === false) {
+        col.innerHTML = `<h3>${m.model_label}</h3><p class="empty-row">No index for the selected AOI with this model.</p>`;
+        wrap.appendChild(col);
+        continue;
+      }
+      const row = m.rankings[scale] || { results: [], confidence: { band: 'unknown', message: '' } };
+      perModelCounts[mid] += row.results.length;
+      const conf = row.confidence || { band: 'unknown', message: '' };
+      col.innerHTML = `
+        <h3>${m.model_label}</h3>
+        <p class="scale-caption">${row.results.length} result(s).</p>
+        <span class="confidence-band ${conf.band}">confidence: ${conf.band}${conf.percentile != null ? ' (' + conf.percentile.toFixed(0) + 'th pct.)' : ''}</span>
+        <p class="confidence-explainer">${conf.message}</p>
+        <div class="tile-grid" id="grid-${mid}-${scale}"></div>
+      `;
+      wrap.appendChild(col);
+      const grid = col.querySelector(`#grid-${mid}-${scale}`);
+      if (row.results.length === 0) {
+        grid.innerHTML = '<p class="empty-row">No results at this scale for the current filters.</p>';
+        continue;
+      }
+      for (const r of row.results) {
+        const card = document.createElement('div');
+        card.className = 'tile-card';
+        card.innerHTML = `
+          <img loading="lazy" src="/api/thumb?tile_id=${encodeURIComponent(r.tile_id)}&size=160" alt="tile thumbnail">
+          <div class="tile-meta">
+            <div class="score">${r.score_display}</div>
+            <div>${r.date} · ${r.lat.toFixed(4)}, ${r.lon.toFixed(4)}</div>
+          </div>
+        `;
+        card.addEventListener('click', () => openTileModal(r, scale, extentTxt));
+        grid.appendChild(card);
+      }
+    }
+  }
+  const modelChips = modelIds.map(mid => {
+    const m = data.models[mid];
+    const n = m.available === false ? 'no index' : `${perModelCounts[mid]} result(s)`;
+    return `<span class="filter-chip">${m.model_label} — ${n}</span>`;
+  });
+  renderActiveFilters(modelChips);
 }
 
 function openTileModal(r, scale, extent) {
@@ -880,11 +1287,33 @@ document.getElementById('aoi-select').addEventListener('change', (e) => {
   runQuery(state.lastQuery);
 });
 
+// S11b -- switching the model re-runs the current query against that
+// model's index (brief: "switching re-runs the current query against that
+// model's index").
+document.getElementById('model-select').addEventListener('change', (e) => {
+  state.modelId = e.target.value;
+  runQuery(state.lastQuery);
+});
+
+// S11b -- while comparing, the single-model selector does not apply (both
+// models answer); disabling it (not hiding it) keeps U-6's "state is always
+// legible" true of the control itself, not just the results.
+document.getElementById('compare-toggle').addEventListener('change', (e) => {
+  state.compare = e.target.checked;
+  document.getElementById('model-select').disabled = state.compare;
+  runQuery(state.lastQuery);
+});
+
 const defaultAoi = state.aoi;
+const defaultModelId = state.modelId;
 document.getElementById('clear-filters').addEventListener('click', () => {
   state.bbox = null; state.date = ''; state.aoi = defaultAoi;
+  state.modelId = defaultModelId; state.compare = false;
   document.getElementById('bbox-input').value = '';
   document.getElementById('aoi-select').value = defaultAoi;
+  document.getElementById('model-select').value = defaultModelId;
+  document.getElementById('model-select').disabled = false;
+  document.getElementById('compare-toggle').checked = false;
   updateDateOptionsForAoi(defaultAoi);
   document.getElementById('active-filters').innerHTML = '';
   runQuery(state.lastQuery);
@@ -901,6 +1330,19 @@ runQuery(state.lastQuery);
 
 
 class QueryRequest(BaseModel):
+    text: str = ""
+    aoi: str | None = None
+    bbox: list[float] | None = None
+    date: str | None = None
+    top_k: int = retrieve.TOP_K
+    model_id: str | None = None  # S11b -- None means the engine's default model
+
+
+class CompareRequest(BaseModel):
+    """S11b -- no `model_id`: a compare request always answers with every
+    model the engine knows (`Engine.run_compare`'s default), never a single
+    selected one."""
+
     text: str = ""
     aoi: str | None = None
     bbox: list[float] | None = None
@@ -931,15 +1373,35 @@ def create_app(engine: Engine | None = None) -> FastAPI:
             raise HTTPException(422, detail="bbox must have exactly 4 numbers: min_lon, min_lat, max_lon, max_lat")
         top_k = max(1, min(req.top_k, 200))
         try:
-            return answer_query(eng, req.text, aoi=req.aoi, bbox=req.bbox, date=req.date, top_k=top_k)
+            return answer_query(
+                eng, req.text, aoi=req.aoi, bbox=req.bbox, date=req.date, top_k=top_k, model_id=req.model_id
+            )
+        except retrieve.UnitNormError as exc:
+            log.exception("app: embedder returned a non-unit query vector")
+            raise HTTPException(500, detail="the embedder returned an invalid vector for that query") from exc
+        except ValueError as exc:  # unknown AOI/model (Engine.get_corpus/get_embedder) -- a clean 422, not a 500
+            raise HTTPException(422, detail=str(exc)) from exc
+        except Exception as exc:  # never a raw traceback to the client (S5 abuse-case requirement)
+            log.exception("app: unexpected error answering query %r", req.text)
+            raise HTTPException(500, detail=f"unexpected error answering that query: {exc.__class__.__name__}") from exc
+
+    @fastapi_app.post("/api/compare")
+    def compare(req: CompareRequest) -> dict:
+        """S11b -- the same query, ranked independently through every model,
+        never merged (see `answer_compare` / `Engine.run_compare`)."""
+        if req.bbox is not None and len(req.bbox) != 4:
+            raise HTTPException(422, detail="bbox must have exactly 4 numbers: min_lon, min_lat, max_lon, max_lat")
+        top_k = max(1, min(req.top_k, 200))
+        try:
+            return answer_compare(eng, req.text, aoi=req.aoi, bbox=req.bbox, date=req.date, top_k=top_k)
         except retrieve.UnitNormError as exc:
             log.exception("app: embedder returned a non-unit query vector")
             raise HTTPException(500, detail="the embedder returned an invalid vector for that query") from exc
         except ValueError as exc:  # unknown AOI (Engine.get_corpus) -- a clean 422, not a 500
             raise HTTPException(422, detail=str(exc)) from exc
         except Exception as exc:  # never a raw traceback to the client (S5 abuse-case requirement)
-            log.exception("app: unexpected error answering query %r", req.text)
-            raise HTTPException(500, detail=f"unexpected error answering that query: {exc.__class__.__name__}") from exc
+            log.exception("app: unexpected error comparing query %r", req.text)
+            raise HTTPException(500, detail=f"unexpected error comparing that query: {exc.__class__.__name__}") from exc
 
     @fastapi_app.get("/api/thumb")
     def thumb(tile_id: str, size: int = DEFAULT_THUMB_PX) -> Response:

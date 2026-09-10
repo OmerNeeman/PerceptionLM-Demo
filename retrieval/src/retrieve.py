@@ -134,14 +134,24 @@ class Corpus:
 # --------------------------------------------------------------------------
 
 
-def load_corpus(aoi: str, index_root: Path | None = None, data_root: Path | None = None) -> Corpus:
+def load_corpus(
+    aoi: str,
+    index_root: Path | None = None,
+    data_root: Path | None = None,
+    model_id: str = embed_index.DEFAULT_MODEL_ID,
+) -> Corpus:
     """Reload one AOI's index (F-5) and join it to map locations (F-10).
 
     Thin wrapper over `embed_index.load_index` -- reuses it verbatim rather
     than re-implementing the fp16-renormalisation/non-finite-vector guards it
     already owns.
+
+    `model_id` (S11b, mirroring S11a's own `emb_dir`/`load_index` parameter):
+    which model-scoped index to read. Defaults to `DEFAULT_MODEL_ID`, so
+    every pre-S11b caller (which never passed a fourth argument) keeps
+    reading exactly the RemoteCLIP corpus it always did.
     """
-    loaded = embed_index.load_index(aoi, index_root=index_root)
+    loaded = embed_index.load_index(aoi, index_root=index_root, model_id=model_id)
     manifest, vectors = loaded["manifest"], loaded["vectors"]
     tile_scales = np.array([t["scale"] for t in manifest["tiles"]], dtype=np.int64)
     scale_indices = {s: np.where(tile_scales == s)[0] for s in manifest["scales"]}
@@ -157,7 +167,10 @@ def load_corpus(aoi: str, index_root: Path | None = None, data_root: Path | None
 
 
 def load_corpus_multi(
-    aois: Sequence[str], index_root: Path | None = None, data_root: Path | None = None
+    aois: Sequence[str],
+    index_root: Path | None = None,
+    data_root: Path | None = None,
+    model_id: str = embed_index.DEFAULT_MODEL_ID,
 ) -> Corpus:
     """Load and concatenate several AOIs' corpora into one `Corpus` -- brief
     S6, Part 3's "all AOIs" option. Cross-AOI ranking within a scale is
@@ -171,6 +184,11 @@ def load_corpus_multi(
     component is its own AOI, `tiling.make_tile_id`), so `locations` merges
     with no key collisions and no tile can be double-counted.
 
+    `model_id` (S11b): every AOI is read from the same model-scoped index
+    (never mixed models within one combined corpus -- that would be exactly
+    the cross-model comparison F-1a and the S11b brief forbid). Defaults to
+    `DEFAULT_MODEL_ID` for pre-S11b callers.
+
     Raises `embed_index.MixedEmbedderError` if the AOIs were not all built
     with the same model id and revision -- F-1a's guarantee must hold across
     AOIs too, not just within one, before any of their vectors are ever
@@ -178,7 +196,7 @@ def load_corpus_multi(
     """
     if not aois:
         raise ValueError("load_corpus_multi: no AOIs given")
-    corpora = [load_corpus(a, index_root=index_root, data_root=data_root) for a in aois]
+    corpora = [load_corpus(a, index_root=index_root, data_root=data_root, model_id=model_id) for a in aois]
 
     model_ids = {c.manifest["model_id"] for c in corpora}
     revisions = {c.manifest["revision"] for c in corpora}
@@ -464,13 +482,29 @@ CONFIDENCE_LOW_MAX_PERCENTILE = 33.0
 CONFIDENCE_HIGH_MIN_PERCENTILE = 67.0
 
 
-def background_path(aoi: str, index_root: Path | None = None) -> Path:
-    """Where the background reference set for one AOI is stored -- alongside
-    the F-2a export artifact (`export_basis.export_dir`), so a query-time
+def background_path(
+    aoi: str, index_root: Path | None = None, model_id: str = embed_index.DEFAULT_MODEL_ID
+) -> Path:
+    """Where the background reference set for one (model, AOI) pair is
+    stored.
+
+    For `DEFAULT_MODEL_ID` this is unchanged from pre-S11b: alongside the
+    F-2a export artifact (`export_basis.export_dir`), so a query-time
     confidence band never needs to re-embed 30 queries or re-touch the
     corpus, and so this reference set travels with the same per-AOI bundle
-    S5 will ship."""
-    return export_basis.export_dir(aoi, index_root) / BACKGROUND_NAME
+    S5 ships.
+
+    For any other model (S11b), the export directory is explicitly out of
+    scope -- it ships one model by design and carries no budget for a second
+    model's artifacts (briefs/S11b.md) -- so that model's background lives
+    beside its own model-scoped embedding index instead
+    (`embed_index.emb_dir`), which already exists and is never touched by
+    the export pipeline. Two models' backgrounds therefore never share a
+    path and can never silently overwrite each other.
+    """
+    if model_id == embed_index.DEFAULT_MODEL_ID:
+        return export_basis.export_dir(aoi, index_root) / BACKGROUND_NAME
+    return embed_index.emb_dir(aoi, index_root, model_id=model_id) / BACKGROUND_NAME
 
 
 def build_background(
@@ -478,15 +512,20 @@ def build_background(
     index_root: Path | None = None,
     data_root: Path | None = None,
     embedder=None,
+    model_id: str = embed_index.DEFAULT_MODEL_ID,
 ) -> dict:
     """Embed `BACKGROUND_QUERIES` once and record each one's top-1 cosine
     score per scale against this AOI's full-precision corpus (never the
     PCA/int8 export -- confidence banding is a property of the real scores a
     user's query is ranked against). Written under `background_path` so this
     is a reproducible build artifact, not something recomputed per query.
+
+    `model_id` (S11b): which model's own corpus/text-tower this background is
+    calibrated against -- never mixed with another model's scores (see
+    `background_path`). Defaults to `DEFAULT_MODEL_ID` for pre-S11b callers.
     """
-    corpus = load_corpus(aoi, index_root=index_root, data_root=data_root)
-    emb = embedder or embedders.load_embedder(embed_index.DEFAULT_MODEL_ID)
+    corpus = load_corpus(aoi, index_root=index_root, data_root=data_root, model_id=model_id)
+    emb = embedder or embedders.load_embedder(model_id)
     qvecs = np.asarray(emb.embed_texts(list(BACKGROUND_QUERIES)), dtype=np.float32)
 
     scores_by_scale: dict[int, list[float]] = {s: [] for s in corpus.manifest["scales"]}
@@ -503,7 +542,7 @@ def build_background(
         "queries": list(BACKGROUND_QUERIES),
         "scores_by_scale": scores_by_scale,
     }
-    path = background_path(aoi, index_root)
+    path = background_path(aoi, index_root, model_id=model_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     # JSON object keys must be strings -- serialise a str-keyed copy, but
@@ -519,13 +558,19 @@ def build_background(
     return doc
 
 
-def load_background(aoi: str, index_root: Path | None = None) -> dict:
-    """Reload one AOI's background reference set from disk -- the
-    fresh-process verification path this project's test discipline requires
-    (do not trust what `build_background` returned in memory). Scale keys
-    are parsed back to ``int`` for direct use as `rank_per_scale`'s
-    `background` argument."""
-    path = background_path(aoi, index_root)
+def load_background(
+    aoi: str, index_root: Path | None = None, model_id: str = embed_index.DEFAULT_MODEL_ID
+) -> dict:
+    """Reload one (model, AOI) pair's background reference set from disk --
+    the fresh-process verification path this project's test discipline
+    requires (do not trust what `build_background` returned in memory).
+    Scale keys are parsed back to ``int`` for direct use as
+    `rank_per_scale`'s `background` argument.
+
+    `model_id` (S11b): see `background_path` -- defaults to
+    `DEFAULT_MODEL_ID` for pre-S11b callers.
+    """
+    path = background_path(aoi, index_root, model_id=model_id)
     doc = json.loads(path.read_text())
     doc["scores_by_scale"] = {int(k): v for k, v in doc["scores_by_scale"].items()}
     return doc
