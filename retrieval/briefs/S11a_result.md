@@ -471,3 +471,34 @@ control, so a repeat of this needs either coordination between concurrent
 sessions or a cross-process lock in `embed_index.py` (not built here --
 out of S11a's scope) before concurrent workers on this project's index
 become routine.
+
+---
+
+## PM annotation — 2026-09-10, correcting the incident attribution
+
+This document describes the concurrent writer as *"a second independent process
+from another live session on the same machine"* and as a *"foreign process"*.
+
+**That process was the PM.** The attribution is understandable — from inside
+this worker it was genuinely an unidentified writer — but it should not stand
+uncorrected in the project record.
+
+What happened: this agent returned `"Waiting."` as an entire handback and a task
+notification reported it had stopped. The PM read that as a stalled stage with
+an orphaned child process, and began driving the remaining scenes directly.
+**The agent was still alive and working.** For a few minutes both wrote
+`emb/PE-Core-L14-336/gaza/`.
+
+So each side saw the other as an intruder, and both were behaving reasonably on
+the information available. The fault is the PM's: it raced a live worker instead
+of resuming it.
+
+**No damage.** Post-build verification found tile-id sets identical across both
+models (104,374, zero difference either way), norms within 1.79e-07, and rows
+matching manifests on all eight shards. The 2,149-tile gap this agent found and
+repaired was real, and the resume logic built for N-2 crash-recovery covered a
+self-inflicted race it was never designed for.
+
+**Standing lesson, recorded in `notes.md#s11a`:** a task notification saying an
+agent stopped is not proof its *work* stopped. Check for live processes before
+taking over a stage, and prefer resuming the agent to racing it.
